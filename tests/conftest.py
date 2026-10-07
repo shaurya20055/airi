@@ -2,26 +2,20 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from app.core.events.bus import EventBus
-from app.core.events.events import Event
-from app.core.permissions.manager import PermissionManager, PermissionLevel
+from app.core.permissions.manager import PermissionManager
+from app.core.permissions.levels import PermissionLevel
 from app.tools.registry import (
-    PermissionLevel as ToolPermissionLevel,
     ToolDefinition,
     ToolParameter,
     ToolRegistry,
     ToolResult,
-    tool,
 )
 from app.memory.store import MemoryStore
 from app.ai.providers.local.provider import LocalProvider
-from app.ai.schemas import AIResponse, Message
-from app.ai.router import AIRouter
-from app.agent.context import AgentContext
-from app.agent.executor import ToolExecutor
-from app.agent.orchestrator import AgentOrchestrator
+from app.ai.schemas import AIResponse
 
 
 @pytest.fixture
@@ -32,26 +26,27 @@ def event_bus():
 @pytest.fixture
 def tool_registry():
     """Provide a clean ToolRegistry with one mock tool registered."""
-    # Reset singleton
-    ToolRegistry._instance = None
-    registry = ToolRegistry()
-
-    # Register a mock tool via the decorator
-    @tool(
+    import app.tools.registry as mod
+    # Clear the global registry instance
+    mod.registry._tools.clear()
+    
+    # Register manually to avoid decorator binding issues
+    defn = ToolDefinition(
         name="mock_tool",
         description="A mock tool for testing",
         category="test",
-        permission_level=ToolPermissionLevel.SAFE,
+        permission_level=PermissionLevel.SAFE,
         parameters=[
             ToolParameter(name="param1", type="string", description="A test param")
-        ],
+        ]
     )
+    
     async def mock_tool_fn(param1: str = "default") -> ToolResult:
         return ToolResult(success=True, data=f"Mocked {param1}", message="OK")
-
-    yield registry
-    # Reset after test
-    ToolRegistry._instance = None
+        
+    mod.registry.register(defn, mock_tool_fn)
+    yield mod.registry
+    mod.registry._tools.clear()
 
 
 @pytest.fixture
@@ -82,9 +77,11 @@ def mock_cloud_provider():
     mock.supports_vision.return_value = True
     mock.supports_tools.return_value = True
     mock.name = "mock_cloud"
-    mock.respond.return_value = AIResponse(
-        text="Cloud response",
-        tool_calls=[],
-        finish_reason="stop",
-    )
+    async def async_respond(*args, **kwargs):
+        return AIResponse(
+            text="Cloud response",
+            tool_calls=[],
+            finish_reason="stop",
+        )
+    mock.respond = AsyncMock(side_effect=async_respond)
     return mock
