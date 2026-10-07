@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airi"
+version = "0.1.0"
+description = "Airi - Your Personal Desktop AI Companion"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "structlog>=23.0",
+    "aiosqlite>=0.19",
+    "python-dotenv>=1.0",
+    "numpy",
+    "Pillow",
+    "httpx",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+ui = ["pyside6"]
+browser = ["playwright"]
+voice = ["sounddevice", "faster-whisper", "kokoro", "openwakeword"]
+cloud = ["openai>=1.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-mock",
+    "ruff",
+]
+all = [
+    "airi[ui,browser,voice,cloud,dev]",
+]
+
+[project.scripts]
+airi = "app.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[project.urls]
+Homepage = "https://github.com/airi/airi"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

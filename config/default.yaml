@@ -1,0 +1,24 @@
+ai_provider: local
+openai_api_key: ""
+openai_model: gpt-6-astra
+
+stt_provider: faster-whisper
+stt_model: base
+
+tts_provider: kokoro
+tts_voice: af_heart
+
+wakeword_enabled: false
+wakeword_model: hey_airi
+
+avatar_enabled: true
+avatar_always_on_top: true
+avatar_opacity: 0.95
+
+log_level: INFO
+memory_db_path: data/memory.db
+
+browser_type: firefox
+screenshot_monitor: 0
+
+permission_default: CONFIRM
