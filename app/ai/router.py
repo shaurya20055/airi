@@ -21,6 +21,10 @@ class AIRouter:
             intent = self.local_provider.classify_intent(text)
             if intent.type == IntentType.TOOL_CALL:
                 return intent
+            # If the local provider has an underlying LLM runtime, it can handle non-tools
+            if hasattr(self.local_provider, 'runtime') and self.local_provider.runtime is not None:
+                intent.requires_cloud = False
+                return intent
                 
         # If local can't handle it or it's complex, and cloud is available
         if self.is_cloud_available():
@@ -46,7 +50,8 @@ class AIRouter:
         if text or images:
             messages.append(Message(role="user", content=text, images=images or []))
             
-        if intent.type == IntentType.TOOL_CALL and not intent.requires_cloud:
+        # If intent is fully local (either local deterministic tool or local LLM fallback)
+        if not intent.requires_cloud:
             return await self.local_provider.respond(messages, tools=tools)
             
         if self.is_cloud_available():

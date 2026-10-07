@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     openai_api_key: str = ''
     openai_model: str = 'gpt-6-astra'
     
+    # Local AI
+    local_ai_enabled: bool = True
+    local_ai_runtime: str = "ollama"
+    local_ai_model: str = "llama3.2:latest"
+    local_ai_temperature: float = 0.7
+    local_ai_timeout: float = 30.0
+    
     # Voice
     stt_provider: str = 'faster-whisper'
     stt_model: str = 'base'

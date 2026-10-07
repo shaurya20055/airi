@@ -25,12 +25,13 @@ class LocalProvider(AIProvider):
     - 'mute' / 'unmute'
     """
 
-    def __init__(self) -> None:
+    def __init__(self, runtime: LocalModelRuntime | None = None) -> None:
         """Build the pattern registry.
 
         Each entry: (compiled_regex, tool_name, arg_names, default_args)
         tool_name must match exactly what's registered in ToolRegistry.
         """
+        self.runtime = runtime
         self._patterns: list[tuple[re.Pattern, str, list[str], dict]] = [
             # Volume -------------------------------------------------------
             (re.compile(
@@ -112,7 +113,7 @@ class LocalProvider(AIProvider):
         return ClassifiedIntent(
             type=IntentType.CONVERSATION,
             confidence=0.5,
-            requires_cloud=True,
+            requires_cloud=self.runtime is None,
         )
 
     # --- AIProvider interface ---
@@ -124,7 +125,7 @@ class LocalProvider(AIProvider):
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> AIResponse:
-        """Respond using local pattern matching."""
+        """Respond using local pattern matching or LocalModelRuntime."""
         if not messages:
             return AIResponse(text="")
 
@@ -138,11 +139,14 @@ class LocalProvider(AIProvider):
                 arguments=intent.tool_args,
             )
             return AIResponse(text="", tool_calls=[call], finish_reason="tool_calls")
+            
+        if self.runtime:
+            return await self.runtime.respond(messages, tools, temperature, max_tokens)
 
         return AIResponse(
             text=(
                 "I can't handle that locally. "
-                "Please configure a cloud AI provider for complex requests."
+                "Please configure a local or cloud AI provider for complex requests."
             ),
             finish_reason="stop",
         )

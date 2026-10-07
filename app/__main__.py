@@ -32,6 +32,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-tts", action="store_true", help="Test TTS synthesis")
     parser.add_argument("--test-screen", action="store_true", help="Test screenshot capture")
     parser.add_argument("--test-browser", action="store_true", help="Test browser automation")
+    parser.add_argument("--benchmark-models", action="store_true", help="Run local AI models benchmark")
     parser.add_argument("--cli", action="store_true", help="Interactive CLI chat mode")
     parser.add_argument("--no-avatar", action="store_true", help="Disable avatar overlay")
     parser.add_argument("--verbose", "-v", action="store_true", help="Set log level to DEBUG")
@@ -319,7 +320,19 @@ async def _async_cli_chat(verbose: bool = False) -> None:
     await memory.initialize()
 
     # AI
-    local_provider = LocalProvider()
+    from app.core.config.settings import get_settings
+    settings = get_settings()
+    
+    local_runtime = None
+    if settings.local_ai_enabled and settings.local_ai_runtime == "ollama":
+        from app.ai.providers.local.ollama_runtime import OllamaRuntime
+        local_runtime = OllamaRuntime(model=settings.local_ai_model, timeout=settings.local_ai_timeout)
+        if await local_runtime._check_server():
+            print(f"  🧠 Local AI ({settings.local_ai_model}) connected.")
+        else:
+            print("  ⚠  Local AI server not reachable (Ollama not running).")
+            
+    local_provider = LocalProvider(runtime=local_runtime)
 
     # Try to set up cloud provider
     cloud_provider = None
@@ -429,6 +442,11 @@ def main() -> None:
     if args.test_browser:
         print("Browser test — Phase 4 (browser automation)")
         print("Not yet implemented.")
+        sys.exit(0)
+
+    if args.benchmark_models:
+        from app.benchmark import run_benchmark
+        asyncio.run(run_benchmark())
         sys.exit(0)
 
     # Default: full application (Phase 3+)
