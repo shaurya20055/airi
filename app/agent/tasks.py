@@ -160,6 +160,7 @@ class ApplicationClarificationTask(InteractiveTask):
         self.created_at = time.time()
         self.is_complete = False
         self.permission_manager = None
+        self.correction_instruction: str | None = None
 
     async def start(self) -> str:
         if self.clarification_stage == "CONFIRM_SINGLE":
@@ -185,71 +186,86 @@ class ApplicationClarificationTask(InteractiveTask):
 
         clean = text.lower().strip()
 
+        # 1. Explicit cancellation / negative
+        is_negative = (
+            clean in {"no", "nope", "cancel", "neither", "none of those", "none", "don't", "dont", "nevermind", "stop", "no the browser", "no, the browser"}
+            or bool(re.match(r"^(?:no|nope|cancel|neither|none|none\s+of\s+those|don't|dont|nevermind|stop)(?:[,\s]+(?:the\s+)?browser)?\b", clean))
+        )
+        if is_negative:
+            logger.info("application_clarification_rejected", query=self.raw_transcribed_name)
+            self.is_complete = True
+            self.clarification_stage = "CANCELLED"
+            self.correction_instruction = None
+            if self.selected_candidate:
+                return f"Okay, I won't launch {self.selected_candidate.name}."
+            return "Okay, cancelled."
+
+        # 2. Correction / replacement instruction (browser, video, search, or redirect)
+        from app.agent.task_context import is_browser_result_reference
+        is_correction = (
+            is_browser_result_reference(text)
+            or bool(re.search(r"\b(firefox|chrome|helium|browser|youtube|video|electroboom|search\s+result|on\s+the\s+page|that\s+we\s+just\s+opened)\b", clean))
+            or bool(re.match(r"^(?:i\s+meant|i\s+was\s+talking\s+about|not\s+that|actually|instead|i\s+said)\b", clean))
+        )
+        if is_correction:
+            logger.info(
+                "application_clarification_abandoned_for_correction",
+                query=self.raw_transcribed_name,
+                correction=text,
+            )
+            self.is_complete = True
+            self.clarification_stage = "ABANDONED"
+            self.correction_instruction = text
+            return f"Abandoning application clarification for '{text}'."
+
+        # 3. Handle CONFIRM_SINGLE stage
         if self.clarification_stage == "CONFIRM_SINGLE":
-            # Affirmative: "yes", "yeah", "yep", "sure", "correct", "that's right", "open it", "launch it", etc.
-            if re.search(r"\b(yes|yeah|yep|sure|correct|that's right|thats right|open it|launch it|please do|ok|okay|do it)\b", clean, re.I):
+            affirmative_pattern = r"\b(?:yes|yeah|yep|sure|correct|that's right|thats right|that one|open it|launch it|please do|ok|okay|do it)\b"
+            is_affirmative = bool(
+                re.search(affirmative_pattern, clean)
+                or (self.selected_candidate and clean in {
+                    self.selected_candidate.name.lower(),
+                    f"open {self.selected_candidate.name.lower()}",
+                    f"launch {self.selected_candidate.name.lower()}",
+                })
+            )
+            if is_affirmative and self.selected_candidate:
                 logger.info("application_clarification_confirmed", confirmed_app=self.selected_candidate.name)
                 self.is_complete = True
                 self.clarification_stage = "DONE"
                 return await self._launch_candidate(self.selected_candidate)
 
-            # Negative: "no", "nope", "cancel", "don't", "nevermind", "stop"
-            if re.search(r"\b(no|nope|cancel|don't|dont|nevermind|stop)\b", clean, re.I):
-                logger.info("application_clarification_rejected", query=self.raw_transcribed_name, rejected_app=self.selected_candidate.name)
+            # Check if user named a completely different app command (e.g. "open gimp", "launch calculator")
+            app_match = re.search(r"^(?:open|launch|start|run)\s+([a-zA-Z0-9_\-\.\s]{1,40})$", clean)
+            if app_match:
+                new_app = app_match.group(1).strip()
                 self.is_complete = True
-                self.clarification_stage = "CANCELLED"
-                return f"Okay, I won't launch {self.selected_candidate.name}."
-
-            # If user names a different application (e.g. "No, open Firefox", "open chrome")
-            app_match = re.search(r"(?:open|launch|start|run)\s+(.+)", text, re.I)
-            target_app = app_match.group(1).strip() if app_match else text.strip()
-            from app.tools.os_tools.app_resolver import AppResolver
-            resolver = AppResolver()
-            res = resolver.resolve(target_app)
-            if res.entry and not res.requires_clarification:
-                self.selected_candidate = res.entry
-                self.is_complete = True
-                self.clarification_stage = "DONE"
-                return await self._launch_candidate(res.entry)
-            elif res.candidates:
-                self.candidates = res.candidates
-                self.candidate_ids = [c.app_id or c.path for c in res.candidates]
-                self.canonical_names = [c.name for c in res.candidates]
-                if len(res.candidates) == 1:
-                    self.selected_candidate = res.candidates[0]
-                    self.clarification_stage = "CONFIRM_SINGLE"
-                    return f"Did you mean {self.canonical_names[0]}?"
-                else:
-                    self.clarification_stage = "CHOOSE_MULTIPLE"
-                    return f"Which one did you mean: {', '.join(self.canonical_names)}?"
+                self.clarification_stage = "ABANDONED"
+                self.correction_instruction = text
+                return f"Switching to {new_app}."
 
             return f"Please answer 'yes' to launch {self.selected_candidate.name}, or 'no' to cancel."
 
+        # 4. Handle CHOOSE_MULTIPLE stage
         elif self.clarification_stage == "CHOOSE_MULTIPLE":
-            if re.search(r"\b(no|cancel|none|neither|stop)\b", clean, re.I):
-                self.is_complete = True
-                self.clarification_stage = "CANCELLED"
-                logger.info("application_clarification_rejected", query=self.raw_transcribed_name)
-                return "Okay, cancelled."
-
-            # Check if user mentioned one of the candidates by name, number, or ordinal
             chosen = None
-            for idx, cand in enumerate(self.candidates, 1):
-                if cand.name.lower() in clean or clean in cand.name.lower():
-                    chosen = cand
-                    break
-                if clean in [str(idx), f"number {idx}", f"option {idx}"]:
-                    chosen = cand
-                    break
-                if idx == 1 and re.search(r"\b(first|one)\b", clean):
-                    chosen = cand
-                    break
-                if idx == 2 and re.search(r"\b(second|two)\b", clean):
-                    chosen = cand
-                    break
-                if idx == 3 and re.search(r"\b(third|three)\b", clean):
-                    chosen = cand
-                    break
+            # Strict ordinal / numeric selection
+            ordinal_1 = {"1", "number 1", "option 1", "#1", "first", "first one", "the first one", "the first"}
+            ordinal_2 = {"2", "number 2", "option 2", "#2", "second", "second one", "the second one", "the second"}
+            ordinal_3 = {"3", "number 3", "option 3", "#3", "third", "third one", "the third one", "the third"}
+
+            if clean in ordinal_1 and len(self.candidates) >= 1:
+                chosen = self.candidates[0]
+            elif clean in ordinal_2 and len(self.candidates) >= 2:
+                chosen = self.candidates[1]
+            elif clean in ordinal_3 and len(self.candidates) >= 3:
+                chosen = self.candidates[2]
+            else:
+                for cand in self.candidates:
+                    c_name = cand.name.lower()
+                    if clean in {c_name, f"open {c_name}", f"launch {c_name}", f"choose {c_name}", f"select {c_name}"}:
+                        chosen = cand
+                        break
 
             if chosen:
                 self.selected_candidate = chosen
@@ -257,6 +273,15 @@ class ApplicationClarificationTask(InteractiveTask):
                 self.clarification_stage = "DONE"
                 logger.info("application_clarification_confirmed", confirmed_app=chosen.name)
                 return await self._launch_candidate(chosen)
+
+            # Check if user named a new app command
+            app_match = re.search(r"^(?:open|launch|start|run)\s+([a-zA-Z0-9_\-\.\s]{1,40})$", clean)
+            if app_match:
+                new_app = app_match.group(1).strip()
+                self.is_complete = True
+                self.clarification_stage = "ABANDONED"
+                self.correction_instruction = text
+                return f"Switching to {new_app}."
 
             return f"Please select one of: {', '.join(self.canonical_names)}, or say 'cancel'."
 

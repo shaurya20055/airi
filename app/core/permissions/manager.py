@@ -178,6 +178,12 @@ class PermissionManager:
             from app.core.permissions.command_policy import CommandPolicy
             dynamic_level, _ = CommandPolicy.classify(args)
             declared = PermissionLevel.strictest(declared, dynamic_level)
+
+        # Dynamic policy for browser operations
+        if tool_name.startswith("browser_") and args:
+            from app.core.permissions.browser_policy import BrowserPolicy
+            dynamic_level, _ = BrowserPolicy.classify(tool_name, args)
+            declared = PermissionLevel.strictest(declared, dynamic_level)
             
         if tool_name == "execute_shell":
             declared = PermissionLevel.DANGEROUS
@@ -195,6 +201,12 @@ class PermissionManager:
         if tool_name == "execute_command" and args:
             from app.core.permissions.command_policy import CommandPolicy
             dynamic_level, reason = CommandPolicy.classify(args)
+            if reason:
+                description = f"{description} ({reason})" if description else reason
+
+        if tool_name.startswith("browser_") and args:
+            from app.core.permissions.browser_policy import BrowserPolicy
+            dynamic_level, reason = BrowserPolicy.classify(tool_name, args)
             if reason:
                 description = f"{description} ({reason})" if description else reason
 

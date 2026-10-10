@@ -100,9 +100,9 @@ class LocalProvider(AIProvider):
              "browser_select_first", [], {"item_type": "result", "query": ""}),
 
             # Applications ─ supports multi-word app names (e.g., "Burp Suite", "helm browser", "Burp sweet"),
-            # while compound actions with "and", "then", "search", "run" are deferred to complex routing.
+            # while compound actions or descriptive browser/result references are never routed to app launch.
             (re.compile(
-                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
+                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b|\bfirst\b|\bsecond\b|\bthird\b|\bvideo\b|\bresult\b|\boption\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
                 re.I,
             ), "launch_application", ["name"], {}),
 
@@ -126,6 +126,26 @@ class LocalProvider(AIProvider):
         known command pattern matches, or CONVERSATION otherwise.
         """
         text = text.strip()
+
+        # Deterministic contextual browser reference routing BEFORE generic patterns
+        try:
+            from app.agent.task_context import is_browser_result_reference, parse_browser_reference
+            if is_browser_result_reference(text):
+                ref = parse_browser_reference(text)
+                return ClassifiedIntent(
+                    type=IntentType.TOOL_CALL,
+                    confidence=1.0,
+                    tool_name="browser_select_first",
+                    tool_args={
+                        "item_type": ref.get("item_type", "video"),
+                        "query": ref.get("query", ""),
+                        "index": ref.get("index", 1),
+                    },
+                    requires_cloud=False,
+                )
+        except Exception:
+            pass
+
         for pattern, tool_name, arg_names, default_args in self._patterns:
             match = pattern.search(text)
             if match:

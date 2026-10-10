@@ -52,11 +52,15 @@ class AgentOrchestrator:
         if self.pending_task:
             self.context.add_user_message(text)
             response = await self.pending_task.handle_input(text)
+            if self.pending_task.is_complete:
+                correction = getattr(self.pending_task, "correction_instruction", None)
+                self.pending_task = None
+                if correction:
+                    # Immediately process the replacement instruction in the main agent loop
+                    return await self.process_input(correction, source=source)
             if response is not None:
                 self.context.add_assistant_message(response)
                 await self.event_bus.publish(AssistantResponseReady(text=response))
-            if self.pending_task.is_complete:
-                self.pending_task = None
             return response or "Task completed."
 
         self.context.add_user_message(text)
@@ -90,7 +94,21 @@ class AgentOrchestrator:
                 interactive_response, continue_loop, final_results = await self._handle_tool_calls(response, tools_schema)
                 if interactive_response is not None:
                     return interactive_response
-                if not continue_loop:
+                cloud_avail = False
+                if hasattr(self.router, "is_cloud_available"):
+                    import inspect
+                    res = self.router.is_cloud_available()
+                    if inspect.iscoroutine(res):
+                        cloud_avail = bool(await res)
+                    else:
+                        cloud_avail = bool(res)
+
+                has_local_runtime = (
+                    hasattr(self.router, "local_provider")
+                    and getattr(self.router.local_provider, "runtime", None) is not None
+                )
+                can_continue = continue_loop and (cloud_avail or has_local_runtime)
+                if not can_continue:
                     # Return the aggregated results as the final response
                     return final_results
             else:

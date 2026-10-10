@@ -414,7 +414,7 @@ def _search_verified(query: str, landing_url: str, final_url: str, title: str) -
         "Use this for 'open <browser> and search X' or 'search YouTube for X'. BROWSER_CONTROL."
     ),
     category="browser",
-    permission_level=PermissionLevel.CONFIRM,
+    permission_level=PermissionLevel.SAFE,
     parameters=[
         ToolParameter(name="browser_name", type="string", description="Browser to use (e.g., Firefox, Helium, Chrome). Empty = active Airi browser, else Firefox.", required=False, default=""),
         ToolParameter(name="query", type="string", description="The search query"),
@@ -513,6 +513,18 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
                               data={"url": final_url, "title": title})
 
         logger.info("browser_search_ok", url=final_url)
+        try:
+            from app.agent.task_context import get_browser_task_context
+            get_browser_task_context().update_search(
+                browser_name=_active_browser_name or browser_name,
+                query=query,
+                site=key,
+                url=final_url,
+                title=title,
+            )
+        except Exception:
+            pass
+
         return ToolResult(success=True, message=f"Searched for '{query}' on {key}",
                           data={"browser": _active_browser_name, "site": key, "query": query,
                                 "title": title, "url": final_url, "selector": typed_selector,
@@ -524,7 +536,7 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
     name="browser_navigate",
     description="Navigate the browser to a specific URL.",
     category="browser",
-    permission_level=PermissionLevel.CONFIRM,
+    permission_level=PermissionLevel.SAFE,
     parameters=[
         ToolParameter(name="url", type="string", description="URL to navigate to")
     ]
@@ -547,7 +559,7 @@ async def browser_navigate(url: str) -> ToolResult:
     name="browser_type",
     description="Type text into an element in the browser. BROWSER_CONTROL.",
     category="browser",
-    permission_level=PermissionLevel.CONFIRM,
+    permission_level=PermissionLevel.SAFE,
     parameters=[
         ToolParameter(name="selector", type="string", description="DOM selector (e.g., 'input[name=\"q\"]', 'textarea')"),
         ToolParameter(name="text", type="string", description="Text to type")
@@ -567,7 +579,7 @@ async def browser_type(selector: str, text: str) -> ToolResult:
     name="browser_press",
     description="Press a keyboard key in the browser.",
     category="browser",
-    permission_level=PermissionLevel.CONFIRM,
+    permission_level=PermissionLevel.SAFE,
     parameters=[
         ToolParameter(name="key", type="string", description="Key to press (e.g., 'Enter', 'Escape')")
     ]
@@ -587,7 +599,7 @@ async def browser_press(key: str) -> ToolResult:
     name="browser_click",
     description="Click an element in the browser.",
     category="browser",
-    permission_level=PermissionLevel.CONFIRM,
+    permission_level=PermissionLevel.SAFE,
     parameters=[
         ToolParameter(name="selector", type="string", description="DOM selector to click")
     ]
@@ -677,7 +689,7 @@ def register(registry) -> None:
             name="browser_search",
             description="Perform a real web search in Airi's automation browser.",
             category="browser",
-            permission_level=PermissionLevel.CONFIRM,
+            permission_level=PermissionLevel.SAFE,
             parameters=[
                 ToolParameter(name="browser_name", type="string", description="Browser to use", required=False, default=""),
                 ToolParameter(name="query", type="string", description="The search query"),
@@ -691,7 +703,7 @@ def register(registry) -> None:
             name="browser_navigate",
             description="Navigate the browser to a specific URL.",
             category="browser",
-            permission_level=PermissionLevel.CONFIRM,
+            permission_level=PermissionLevel.SAFE,
             parameters=[
                 ToolParameter(name="url", type="string", description="URL to navigate to")
             ]
@@ -703,7 +715,7 @@ def register(registry) -> None:
             name="browser_type",
             description="Type text into an element in the browser.",
             category="browser",
-            permission_level=PermissionLevel.CONFIRM,
+            permission_level=PermissionLevel.SAFE,
             parameters=[
                 ToolParameter(name="selector", type="string", description="DOM selector"),
                 ToolParameter(name="text", type="string", description="Text to type")
@@ -716,7 +728,7 @@ def register(registry) -> None:
             name="browser_press",
             description="Press a keyboard key in the browser.",
             category="browser",
-            permission_level=PermissionLevel.CONFIRM,
+            permission_level=PermissionLevel.SAFE,
             parameters=[
                 ToolParameter(name="key", type="string", description="Key to press")
             ]
@@ -728,7 +740,7 @@ def register(registry) -> None:
             name="browser_click",
             description="Click an element in the browser.",
             category="browser",
-            permission_level=PermissionLevel.CONFIRM,
+            permission_level=PermissionLevel.SAFE,
             parameters=[
                 ToolParameter(name="selector", type="string", description="DOM selector to click")
             ]

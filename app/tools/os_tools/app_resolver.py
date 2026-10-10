@@ -164,6 +164,24 @@ class AppResolver:
         if not norm_query:
             return MatchResult(None, 0.0, False, [], "empty", [], False, "")
 
+        # Reject browser / result / ordinal / descriptive phrases immediately
+        DESCRIPTIVE_PHRASES = re.compile(
+            r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:video|result|search\s+result|option|item)\b|"
+            r"\b(?:comes\s+in\s+the\s+result|in\s+the\s+results?|search\s+result|on\s+the\s+page)\b",
+            re.I
+        )
+        if DESCRIPTIVE_PHRASES.search(orig_query) or DESCRIPTIVE_PHRASES.search(norm_query):
+            logger.info("application_resolution_rejected_descriptive", query=orig_query)
+            return MatchResult(None, 0.0, False, [], "descriptive_reference", [], False, "")
+
+        try:
+            from app.agent.task_context import is_browser_result_reference
+            if is_browser_result_reference(orig_query) or is_browser_result_reference(norm_query):
+                logger.info("application_resolution_rejected_browser_ref", query=orig_query)
+                return MatchResult(None, 0.0, False, [], "descriptive_reference", [], False, "")
+        except Exception:
+            pass
+
         # 1. Category only check
         if self._is_category_only(norm_query):
             cat_candidates = [

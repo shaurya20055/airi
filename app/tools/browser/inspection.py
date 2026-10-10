@@ -154,10 +154,17 @@ async def browser_inspect() -> ToolResult:
             required=False,
             default="",
         ),
+        ToolParameter(
+            name="index",
+            type="integer",
+            description="1-based index of the item to select (default: 1)",
+            required=False,
+            default=1,
+        ),
     ],
 )
-async def browser_select_first(item_type: str = "video", query: str = "") -> ToolResult:
-    """Select the first organic result or video in the current Playwright page."""
+async def browser_select_first(item_type: str = "video", query: str = "", index: int = 1) -> ToolResult:
+    """Select the N-th organic result or video in the current Playwright page."""
     page = _get_active_page()
     if not page:
         return ToolResult(
@@ -168,7 +175,7 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
 
     current_url = page.url
     is_youtube = "youtube.com" in current_url.lower()
-    logger.info("browser_select_first_start", item_type=item_type, current_url=current_url, is_youtube=is_youtube)
+    logger.info("browser_select_first_start", item_type=item_type, query=query, index=index, current_url=current_url, is_youtube=is_youtube)
 
     # 1. YouTube Specific Video Resolution
     if is_youtube or item_type == "video":
@@ -187,6 +194,7 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
             video_renderers = await video_renderers
         count = await video_renderers.count()
 
+        matched_count = 0
         for i in range(count):
             renderer = video_renderers.nth(i)
             if asyncio.iscoroutine(renderer):
@@ -211,9 +219,11 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
                     title = raw_title.strip()
                     if query and query.lower() not in title.lower():
                         continue
-                    target_locator = title_link.first
-                    target_title = title
-                    break
+                    matched_count += 1
+                    if matched_count == index:
+                        target_locator = title_link.first
+                        target_title = title
+                        break
 
         # Strategy B: Fallback to general video links if not standard search layout
         if not target_locator:
@@ -221,6 +231,7 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
             if asyncio.iscoroutine(candidate_links):
                 candidate_links = await candidate_links
             cand_count = await candidate_links.count()
+            fallback_matched = 0
             for i in range(cand_count):
                 link = candidate_links.nth(i)
                 if asyncio.iscoroutine(link):
@@ -244,9 +255,11 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
                 if query and query.lower() not in txt.lower():
                     continue
 
-                target_locator = link
-                target_title = txt or "First Video"
-                break
+                fallback_matched += 1
+                if fallback_matched == index:
+                    target_locator = link
+                    target_title = txt or f"Video {index}"
+                    break
 
         if not target_locator:
             return ToolResult(
@@ -310,7 +323,15 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
             loc = await loc
         try:
             c = await loc.count()
-            if c > 0 and await loc.first.is_visible():
+            if c >= index:
+                target_cand = loc.nth(index - 1)
+                if asyncio.iscoroutine(target_cand):
+                    target_cand = await target_cand
+                if await target_cand.is_visible():
+                    selected_locator = target_cand
+                    selected_name = (await selected_locator.text_content() or "").strip()
+                    break
+            elif c > 0 and index == 1 and await loc.first.is_visible():
                 selected_locator = loc.first
                 selected_name = (await selected_locator.text_content() or "").strip()
                 break
@@ -321,10 +342,10 @@ async def browser_select_first(item_type: str = "video", query: str = "") -> Too
         return ToolResult(
             success=False,
             error="no_result_found",
-            message="Could not find an unambiguous first result or option on this page.",
+            message=f"Could not find an unambiguous item at index {index} on this page.",
         )
 
-    logger.info("browser_element_selected", target=selected_name)
+    logger.info("browser_element_selected", target=selected_name, index=index)
     try:
         initial_url = page.url
         await selected_locator.click(timeout=10000)
@@ -364,8 +385,8 @@ def register(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="browser_select_first",
             description=(
-                "Select and open the first matching visible option or video in Airi's browser session. "
-                "Differentiates actual YouTube videos from ads, channels, and playlists."
+                "Select and open a matching visible option or video in Airi's browser session. "
+                "Differentiates actual YouTube videos from ads, channels, and playlists. Supports ordinal indexing."
             ),
             category="browser",
             permission_level=PermissionLevel.SAFE,
@@ -383,6 +404,13 @@ def register(registry: ToolRegistry) -> None:
                     description="Optional target keyword or title filter.",
                     required=False,
                     default="",
+                ),
+                ToolParameter(
+                    name="index",
+                    type="integer",
+                    description="1-based index of item to select (default: 1).",
+                    required=False,
+                    default=1,
                 ),
             ],
         ),
