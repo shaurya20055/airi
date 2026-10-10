@@ -182,17 +182,87 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
         target_locator = None
         target_title = ""
 
+        # Dismiss any YouTube consent / cookie dialog if present
+        try:
+            consent_locators = [
+                "ytd-consent-bump-v2-lightbox button",
+                "button[aria-label*='Accept all' i]",
+                "button[aria-label*='Reject all' i]",
+                "button[aria-label*='Agree' i]",
+                "button:has-text('Accept all')",
+                "button:has-text('Reject all')",
+                "button:has-text('I agree')",
+            ]
+            for c_sel in consent_locators:
+                try:
+                    c_btn = page.locator(c_sel)
+                    if asyncio.iscoroutine(c_btn):
+                        c_btn = await c_btn
+                    c_cnt = c_btn.count()
+                    if asyncio.iscoroutine(c_cnt):
+                        c_cnt = await c_cnt
+                    if int(c_cnt) > 0:
+                        first_btn = c_btn.first
+                        if asyncio.iscoroutine(first_btn):
+                            first_btn = await first_btn
+                        is_vis = first_btn.is_visible()
+                        if asyncio.iscoroutine(is_vis):
+                            is_vis = await is_vis
+                        if is_vis:
+                            logger.info("dismissing_youtube_consent_dialog", selector=c_sel)
+                            await first_btn.click(timeout=1500)
+                            await page.wait_for_timeout(400)
+                            break
+                except Exception:
+                    pass
+        except Exception as ex:
+            logger.debug("consent_dismiss_exception", error=str(ex))
+
         # Wait briefly for results to populate if on a results page
         try:
-            await page.wait_for_selector("ytd-video-renderer, ytd-rich-item-renderer, a[href*='/watch']", timeout=5000)
+            await page.wait_for_selector(
+                "ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, a[href*='/watch']",
+                timeout=5000,
+            )
         except Exception:
             pass
 
-        # Strategy A: Use ytd-video-renderer containers to exclude ads
+        is_results_page = "/results" in current_url.lower()
+        query_in_page_url = bool(
+            query and is_results_page and (
+                query.lower() in current_url.lower()
+                or query.replace(" ", "+").lower() in current_url.lower()
+                or query.replace(" ", "%20").lower() in current_url.lower()
+            )
+        )
+
+        # Strategy A: Use video renderer containers to exclude ads
         video_renderers = page.locator("ytd-video-renderer")
         if asyncio.iscoroutine(video_renderers):
             video_renderers = await video_renderers
-        count = await video_renderers.count()
+        try:
+            cnt_val = video_renderers.count()
+            if asyncio.iscoroutine(cnt_val):
+                cnt_val = await cnt_val
+            count = int(cnt_val)
+        except Exception:
+            count = 0
+
+        if count == 0:
+            for alt_sel in ("ytd-rich-item-renderer", "ytd-compact-video-renderer"):
+                try:
+                    alt_renderers = page.locator(alt_sel)
+                    if asyncio.iscoroutine(alt_renderers):
+                        alt_renderers = await alt_renderers
+                    alt_cnt = alt_renderers.count()
+                    if asyncio.iscoroutine(alt_cnt):
+                        alt_cnt = await alt_cnt
+                    if int(alt_cnt) > 0:
+                        video_renderers = alt_renderers
+                        count = int(alt_cnt)
+                        break
+                except Exception:
+                    pass
 
         matched_count = 0
         for i in range(count):
@@ -201,33 +271,84 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                 renderer = await renderer
 
             # Check if this renderer is an advertisement
-            ad_check = renderer.locator("ytd-ad-slot-renderer, .badge-style-type-ad, [aria-label*='Ad' i], [aria-label*='Sponsored' i]")
-            if asyncio.iscoroutine(ad_check):
-                ad_check = await ad_check
-            is_ad = await ad_check.count() > 0
+            is_ad = False
+            try:
+                ad_check = renderer.locator(
+                    "ytd-ad-slot-renderer, .badge-style-type-ad, [aria-label*='Ad' i], [aria-label*='Sponsored' i], ytd-in-feed-ad-layout-renderer"
+                )
+                if asyncio.iscoroutine(ad_check):
+                    ad_check = await ad_check
+                ad_cnt = ad_check.count()
+                if asyncio.iscoroutine(ad_cnt):
+                    ad_cnt = await ad_cnt
+                is_ad = int(ad_cnt) > 0
+            except Exception:
+                is_ad = False
             if is_ad:
                 continue
 
             title_link = renderer.locator("a#video-title")
             if asyncio.iscoroutine(title_link):
                 title_link = await title_link
-            if await title_link.count() > 0 and await title_link.first.is_visible():
-                href = await title_link.first.get_attribute("href") or ""
+            try:
+                tl_cnt = title_link.count()
+                if asyncio.iscoroutine(tl_cnt):
+                    tl_cnt = await tl_cnt
+                has_tl = int(tl_cnt) > 0
+            except Exception:
+                has_tl = False
+
+            if not has_tl:
+                try:
+                    alt_tl = renderer.locator("a#video-title-link, a[href*='/watch?v=']")
+                    if asyncio.iscoroutine(alt_tl):
+                        alt_tl = await alt_tl
+                    alt_cnt = alt_tl.count()
+                    if asyncio.iscoroutine(alt_cnt):
+                        alt_cnt = await alt_cnt
+                    if int(alt_cnt) > 0:
+                        title_link = alt_tl
+                        has_tl = True
+                except Exception:
+                    pass
+
+            first_link = None
+            if has_tl:
+                first_link = title_link.first
+                if asyncio.iscoroutine(first_link):
+                    first_link = await first_link
+                try:
+                    is_vis = first_link.is_visible()
+                    if asyncio.iscoroutine(is_vis):
+                        is_vis = await is_vis
+                    if not is_vis:
+                        first_link = None
+                except Exception:
+                    pass
+
+            if first_link:
+                href = (await first_link.get_attribute("href")) or ""
                 # Must be a real video (/watch?v=), not a playlist, channel, or shorts
-                if "/watch?v=" in href and "/playlist" not in href:
-                    raw_title = await title_link.first.text_content() or ""
-                    title = raw_title.strip()
-                    if query and query.lower() not in title.lower():
+                if "/watch?v=" in href and "/playlist" not in href and "/shorts/" not in href:
+                    raw_title = (
+                        (await first_link.text_content())
+                        or (await first_link.get_attribute("title"))
+                        or (await first_link.get_attribute("aria-label"))
+                        or ""
+                    ).strip()
+                    title = raw_title
+                    # Only filter title by query if query is not the general page search query
+                    if query and not query_in_page_url and query.lower() not in title.lower():
                         continue
                     matched_count += 1
                     if matched_count == index:
-                        target_locator = title_link.first
+                        target_locator = first_link
                         target_title = title
                         break
 
         # Strategy B: Fallback to general video links if not standard search layout
         if not target_locator:
-            candidate_links = page.locator("a[href*='/watch?v=']:not([href*='/playlist'])")
+            candidate_links = page.locator("a[href*='/watch?v=']:not([href*='/playlist']):not([href*='/shorts/'])")
             if asyncio.iscoroutine(candidate_links):
                 candidate_links = await candidate_links
             cand_count = await candidate_links.count()
@@ -240,7 +361,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                     continue
                 # Exclude ads
                 ancestor_ad = link.locator(
-                    "xpath=ancestor::*[contains(@class, 'ad') or contains(@id, 'ad') or contains(@aria-label, 'Ad')]"
+                    "xpath=ancestor::*[contains(@class, 'ad') or contains(@id, 'ad') or contains(@aria-label, 'Ad') or contains(@aria-label, 'Sponsored')]"
                 )
                 if asyncio.iscoroutine(ancestor_ad):
                     ancestor_ad = await ancestor_ad
@@ -248,11 +369,13 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                 if is_ad:
                     continue
 
-                txt = (await link.text_content() or "").strip()
-                if not txt:
-                    # check title attribute or aria-label
-                    txt = (await link.get_attribute("title") or await link.get_attribute("aria-label") or "").strip()
-                if query and query.lower() not in txt.lower():
+                txt = (
+                    await link.text_content()
+                    or await link.get_attribute("title")
+                    or await link.get_attribute("aria-label")
+                    or ""
+                ).strip()
+                if query and not query_in_page_url and query.lower() not in txt.lower():
                     continue
 
                 fallback_matched += 1
@@ -273,25 +396,63 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
         # Click and verify
         try:
             initial_url = page.url
-            await target_locator.click(timeout=10000)
-            
+            try:
+                await target_locator.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+
+            try:
+                await target_locator.click(timeout=8000)
+            except Exception as click_err:
+                logger.warning("direct_click_failed_attempting_dispatch", error=str(click_err))
+                await target_locator.dispatch_event("click")
+
             # Verify URL changed or video player loaded
             try:
                 await page.wait_for_url(lambda u: "/watch" in u or u != initial_url, timeout=12000)
-                await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                await page.wait_for_load_state("domcontentloaded", timeout=6000)
+            except Exception:
+                pass
+
+            # Check if video player element exists and is active
+            player_active = False
+            try:
+                player = page.locator("#movie_player, video.html5-main-video")
+                if asyncio.iscoroutine(player):
+                    player = await player
+                if await player.count() > 0:
+                    player_active = True
             except Exception:
                 pass
 
             new_url = page.url
-            if "/watch" in new_url or new_url != initial_url:
-                logger.info("action_verification_success", new_url=new_url)
+            if "/watch" in new_url or (new_url != initial_url and player_active) or (new_url != initial_url):
+                logger.info(
+                    "action_verification_success",
+                    target_title=target_title,
+                    initial_url=initial_url,
+                    new_url=new_url,
+                    player_active=player_active,
+                )
+                try:
+                    from app.agent.task_context import get_browser_task_context
+                    ctx = get_browser_task_context()
+                    ctx.update_navigation(url=new_url, title=target_title)
+                except Exception:
+                    pass
+
                 return ToolResult(
                     success=True,
                     message=f"Opened video: '{target_title}' ({new_url}).",
                     data={"title": target_title, "url": new_url, "verified": True},
                 )
             else:
-                logger.error("action_verification_failure", reason="url_did_not_change", url=new_url)
+                logger.error(
+                    "action_verification_failure",
+                    reason="url_did_not_change_and_no_player",
+                    initial_url=initial_url,
+                    new_url=new_url,
+                )
                 return ToolResult(
                     success=False,
                     error="verification_failed",
@@ -355,12 +516,26 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
             pass
 
         new_url = page.url
-        logger.info("action_verification_success", new_url=new_url)
-        return ToolResult(
-            success=True,
-            message=f"Selected: '{selected_name}' ({new_url}).",
-            data={"title": selected_name, "url": new_url, "verified": True},
-        )
+        if new_url != initial_url:
+            logger.info("action_verification_success", new_url=new_url, target=selected_name)
+            try:
+                from app.agent.task_context import get_browser_task_context
+                ctx = get_browser_task_context()
+                ctx.update_navigation(url=new_url, title=selected_name)
+            except Exception:
+                pass
+            return ToolResult(
+                success=True,
+                message=f"Selected: '{selected_name}' ({new_url}).",
+                data={"title": selected_name, "url": new_url, "verified": True},
+            )
+        else:
+            logger.error("action_verification_failure", reason="url_did_not_change", url=new_url)
+            return ToolResult(
+                success=False,
+                error="verification_failed",
+                message=f"Clicked '{selected_name}', but could not verify that navigation occurred.",
+            )
     except Exception as e:
         logger.error("action_verification_failure", error=str(e))
         return ToolResult(success=False, error=f"Failed to click result: {e}")

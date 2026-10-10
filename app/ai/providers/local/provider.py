@@ -102,7 +102,7 @@ class LocalProvider(AIProvider):
             # Applications ─ supports multi-word app names (e.g., "Burp Suite", "helm browser", "Burp sweet"),
             # while compound actions or descriptive browser/result references are never routed to app launch.
             (re.compile(
-                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b|\bfirst\b|\bsecond\b|\bthird\b|\bvideo\b|\bresult\b|\boption\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
+                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b|\bfirst\b|\bsecond\b|\bthird\b|\bfourth\b|\bfifth\b|\b1st\b|\b2nd\b|\b3rd\b|\bvideo\b|\bresult\b|\boption\b|\bitem\b|\blink\b|\bcurrent\b|\bone\b|\bthat\s+video\b|\bthat\s+one\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
                 re.I,
             ), "launch_application", ["name"], {}),
 

@@ -84,13 +84,13 @@ _ORDINAL_MAP = {
 
 _BROWSER_REF_PATTERN = re.compile(
     r"\b(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|1|2|3)\s+"
-    r"(video|result|search\s+result|option)"
+    r"(video|result|search\s+result|option|item|one|link)"
     r"(?:\s+(?:that\s+comes\s+in\s+the\s+result|in\s+the\s+results?|on\s+the\s+page|in\s+the\s+browser|on\s+youtube))?",
     re.I
 )
 
 _PRONOUN_REF_PATTERN = re.compile(
-    r"^(?:open|play|click|select)\s+(?:it|that\s+video|that\s+result|that\s+page)[.!?]?$",
+    r"^(?:just\s+|please\s+)?(?:open|play|click(?:\s+on)?|select)\s+(?:it|that\s+video|that\s+result|that\s+page|that\s+one)[.!?]?$",
     re.I
 )
 
@@ -102,8 +102,12 @@ def is_browser_result_reference(text: str) -> bool:
         return True
     if _PRONOUN_REF_PATTERN.search(clean):
         return True
-    # "open the first video", "play the first video", "open the first video that comes in the result"
-    if re.search(r"\b(?:open|play|click|select)\s+(?:the\s+)?(?:first|second|third|1st|2nd)\s+(?:video|result|option)\b", clean, re.I):
+    # "just click the first video", "click on the first video", "play the first video", "open the first video that comes in the result"
+    if re.search(
+        r"\b(?:just\s+|please\s+)?(?:open|play|click(?:\s+on)?|select)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s*(?:video|result|option|item|one|link)?\b",
+        clean,
+        re.I,
+    ):
         return True
     return False
 
@@ -127,18 +131,34 @@ def parse_browser_reference(text: str, context: Optional[BrowserTaskContext] = N
             item_type = "option"
         else:
             item_type = "result"
-    elif re.search(r"\bsecond\b", clean, re.I):
+    elif re.search(r"\b(?:first|1st)\b", clean, re.I):
+        index = 1
+    elif re.search(r"\b(?:second|2nd)\b", clean, re.I):
         index = 2
-    elif re.search(r"\bthird\b", clean, re.I):
+    elif re.search(r"\b(?:third|3rd)\b", clean, re.I):
         index = 3
+    elif re.search(r"\b(?:fourth|4th)\b", clean, re.I):
+        index = 4
+    elif re.search(r"\b(?:fifth|5th)\b", clean, re.I):
+        index = 5
 
     # If context has search query e.g. "ElectroBOOM", propagate it
     query = ctx.last_search_query or ""
-    # Check if user mentioned query in the utterance e.g. "on the ElectroBoom page"
-    q_match = re.search(r"(?:on|for)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+page|\s+results?)?$", clean, re.I)
+
+    # Do not treat "on" in "click on / tap on / press on" as a query preposition
+    clean_no_verb = re.sub(r"\b(?:click|tap|press)\s+on\b", "", clean, flags=re.I)
+    # Check if user mentioned a query or target in the utterance e.g. "for ElectroBOOM" or "on the ElectroBOOM page"
+    q_match = re.search(r"(?:on|for)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+page|\s+results?)?$", clean_no_verb, re.I)
     if q_match:
         extracted = q_match.group(1).strip()
-        if extracted and extracted.lower() not in ("youtube", "browser", "result", "page", "firefox", "chrome"):
+        generic_tokens = {
+            "first", "second", "third", "fourth", "fifth", "1st", "2nd", "3rd", "4th", "5th",
+            "video", "videos", "result", "results", "option", "options", "item", "items", "one",
+            "page", "browser", "youtube", "firefox", "chrome", "screen", "link",
+        }
+        tokens = set(extracted.lower().split())
+        # Only accept if not composed of ordinal or generic tokens
+        if extracted and not tokens.issubset(generic_tokens) and not any(o in tokens for o in ("first", "second", "third", "1st", "2nd", "3rd")):
             query = extracted
 
     return {

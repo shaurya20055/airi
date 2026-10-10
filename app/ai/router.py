@@ -25,6 +25,8 @@ class AIRouter:
             if hasattr(self.local_provider, 'runtime') and self.local_provider.runtime is not None:
                 intent.requires_cloud = False
                 return intent
+            if not intent.requires_cloud:
+                return intent
                 
         # If local can't handle it or it's complex, and cloud is available
         if self.is_cloud_available():

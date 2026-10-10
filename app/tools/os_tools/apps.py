@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import structlog
 
-from app.tools.registry import PermissionLevel, ToolParameter, ToolRegistry, ToolResult, tool
+from app.tools.registry import PermissionLevel, ToolDefinition, ToolParameter, ToolRegistry, ToolResult, tool
 from app.tools.os_tools.app_resolver import AppResolver
 from app.tools.os_tools.desktop_parser import DesktopEntry
 

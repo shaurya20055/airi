@@ -5,7 +5,7 @@ import base64
 import os
 import time
 
-from app.tools.registry import PermissionLevel, ToolParameter, ToolRegistry, ToolResult, tool
+from app.tools.registry import PermissionLevel, ToolDefinition, ToolParameter, ToolRegistry, ToolResult, tool
 
 
 @tool(

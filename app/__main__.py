@@ -272,7 +272,14 @@ def run_list_tools() -> None:
 
 
 def _import_all_tools() -> None:
-    """Import all tool modules to trigger decorator-based registration."""
+    """Import all tool modules to trigger decorator-based and explicit registration."""
+    from app.tools.registry import ToolRegistry
+    from app.tools import register_all_tools
+
+    registry = ToolRegistry()
+    register_all_tools(registry)
+
+    # Ensure explicit tool modules are always imported
     tool_modules = [
         "app.tools.os_tools.volume",
         "app.tools.os_tools.brightness",
@@ -284,13 +291,19 @@ def _import_all_tools() -> None:
         "app.tools.system.network",
         "app.tools.system.visible_terminal",
         "app.tools.browser.automation",
+        "app.tools.browser.inspection",
         "app.tools.screen.capture",
+        "app.tools.screen.interaction",
+        "app.tools.screen.observer",
+        "app.tools.screen.watcher",
         "app.tools.files.manager",
     ]
     import importlib
     for mod in tool_modules:
         try:
-            importlib.import_module(mod)
+            m = importlib.import_module(mod)
+            if hasattr(m, "register"):
+                m.register(registry)
         except ImportError as e:
             print(f"  Warning: could not import {mod}: {e}")
 

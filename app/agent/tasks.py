@@ -189,7 +189,7 @@ class ApplicationClarificationTask(InteractiveTask):
         # 1. Explicit cancellation / negative
         is_negative = (
             clean in {"no", "nope", "cancel", "neither", "none of those", "none", "don't", "dont", "nevermind", "stop", "no the browser", "no, the browser"}
-            or bool(re.match(r"^(?:no|nope|cancel|neither|none|none\s+of\s+those|don't|dont|nevermind|stop)(?:[,\s]+(?:the\s+)?browser)?\b", clean))
+            or bool(re.match(r"^(?:no|nope|cancel|neither|none|none\s+of\s+those|don't|dont|nevermind|stop)(?:[,\s]+(?:the\s+)?browser)?[.!?]?$", clean))
         )
         if is_negative:
             logger.info("application_clarification_rejected", query=self.raw_transcribed_name)
@@ -201,11 +201,21 @@ class ApplicationClarificationTask(InteractiveTask):
             return "Okay, cancelled."
 
         # 2. Correction / replacement instruction (browser, video, search, or redirect)
+        ordinal_choices = {
+            "1", "number 1", "option 1", "#1", "first", "first one", "the first one", "the first",
+            "2", "number 2", "option 2", "#2", "second", "second one", "the second one", "the second",
+            "3", "number 3", "option 3", "#3", "third", "third one", "the third one", "the third",
+        }
+        is_candidate_choice = (self.clarification_stage == "CHOOSE_MULTIPLE" and clean in ordinal_choices)
+
         from app.agent.task_context import is_browser_result_reference
         is_correction = (
-            is_browser_result_reference(text)
-            or bool(re.search(r"\b(firefox|chrome|helium|browser|youtube|video|electroboom|search\s+result|on\s+the\s+page|that\s+we\s+just\s+opened)\b", clean))
-            or bool(re.match(r"^(?:i\s+meant|i\s+was\s+talking\s+about|not\s+that|actually|instead|i\s+said)\b", clean))
+            not is_candidate_choice
+            and (
+                is_browser_result_reference(text)
+                or bool(re.search(r"\b(firefox|chrome|helium|browser|youtube|video|electroboom|search\s+result|on\s+the\s+page|that\s+we\s+just\s+opened)\b", clean))
+                or bool(re.match(r"^(?:i\s+meant|i\s+was\s+talking\s+about|not\s+that|actually|instead|i\s+said)\b", clean))
+            )
         )
         if is_correction:
             logger.info(
