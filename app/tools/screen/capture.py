@@ -68,4 +68,28 @@ async def capture_screen_base64(monitor: int = 0) -> ToolResult:
 
 
 def register(registry: ToolRegistry) -> None:
-    pass
+    registry.register(
+        ToolDefinition(
+            name="take_screenshot",
+            description="Take a screenshot of the screen.",
+            category="Screen",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="monitor", type="integer", description="Monitor index to capture", required=False, default=0),
+                ToolParameter(name="region", type="array", description="Optional region (x, y, w, h)", required=False)
+            ]
+        ),
+        take_screenshot
+    )
+    registry.register(
+        ToolDefinition(
+            name="capture_screen_base64",
+            description="Capture the screen and return it as a base64 string.",
+            category="Screen",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="monitor", type="integer", description="Monitor index to capture", required=False, default=0)
+            ]
+        ),
+        capture_screen_base64
+    )

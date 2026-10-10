@@ -78,6 +78,27 @@ class LocalProvider(AIProvider):
                 re.I,
             ), "browser_search", ["browser_name", "site", "query"], {}),
 
+            # Screen Observation & Awareness --------------------------------
+            (re.compile(
+                r"^(?:what(?:'s|\s+is)\s+(?:on|showing\s+on)\s+(?:my\s+|the\s+)?screen|"
+                r"what\s+window\s+is\s+active|which\s+window\s+is\s+active|"
+                r"read\s+(?:this\s+|the\s+)?error(?:\s+on\s+screen)?|"
+                r"what\s+(?:is\s+|does\s+)(?:this\s+|the\s+)(?:webpage\s+showing|dialog\s+say))[.!?]?$",
+                re.I,
+            ), "screen_observe", [], {"target": "auto", "focus_question": ""}),
+
+            # Screen Watch Mode ---------------------------------------------
+            (re.compile(r"^(?:watch\s+my\s+screen|start\s+watching\s+(?:my\s+)?screen)[.!?]?$", re.I),
+             "screen_watch_start", [], {"interval": 2.0}),
+            (re.compile(r"^(?:stop\s+watching\s+(?:my\s+)?screen)[.!?]?$", re.I),
+             "screen_watch_stop", [], {}),
+
+            # First Option / Video Selection --------------------------------
+            (re.compile(r"^(?:open|play)\s+(?:the\s+)?first\s+video(?:\s+on\s+youtube)?[.!?]?$", re.I),
+             "browser_select_first", [], {"item_type": "video", "query": ""}),
+            (re.compile(r"^(?:select|click)\s+(?:the\s+)?first\s+(?:option|result|search\s+result)(?:\s+in\s+the\s+browser)?[.!?]?$", re.I),
+             "browser_select_first", [], {"item_type": "result", "query": ""}),
+
             # Applications ─ supports multi-word app names (e.g., "Burp Suite", "helm browser", "Burp sweet"),
             # while compound actions with "and", "then", "search", "run" are deferred to complex routing.
             (re.compile(
@@ -183,7 +204,21 @@ class LocalProvider(AIProvider):
         images: list[str],
         tools: list[dict] | None = None,
     ) -> AIResponse:
-        """Vision not supported locally."""
+        """Analyze images using local vision processor if runtime is available."""
+        if self.runtime and images:
+            import base64
+            from app.tools.screen.vision import get_screen_vision_processor
+            try:
+                raw_bytes = base64.b64decode(images[0])
+                proc = get_screen_vision_processor()
+                res = await proc.analyze_screen(raw_bytes, focus_prompt=prompt)
+                if res.get("success"):
+                    return AIResponse(text=res.get("summary", ""), finish_reason="stop")
+                else:
+                    return AIResponse(text=res.get("message", "Visual inspection failed."), finish_reason="error")
+            except Exception as e:
+                return AIResponse(text=f"Visual analysis error: {e}", finish_reason="error")
+
         return AIResponse(
             text="Vision requires a cloud AI provider. Set OPENAI_API_KEY in your .env file."
         )
@@ -192,7 +227,7 @@ class LocalProvider(AIProvider):
         return True
 
     def supports_vision(self) -> bool:
-        return False
+        return self.runtime is not None
 
     def supports_tools(self) -> bool:
         return True

@@ -659,4 +659,111 @@ async def browser_wait(selector: str | None = None) -> ToolResult:
         return ToolResult(success=False, error=str(e))
 
 def register(registry) -> None:
-    pass
+    from app.tools.registry import ToolDefinition
+    registry.register(
+        ToolDefinition(
+            name="browser_open",
+            description="Start (or reuse) Airi's own automation browser session for DOM control.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="browser_name", type="string", description="Browser to open")
+            ]
+        ),
+        browser_open
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_search",
+            description="Perform a real web search in Airi's automation browser.",
+            category="browser",
+            permission_level=PermissionLevel.CONFIRM,
+            parameters=[
+                ToolParameter(name="browser_name", type="string", description="Browser to use", required=False, default=""),
+                ToolParameter(name="query", type="string", description="The search query"),
+                ToolParameter(name="site", type="string", description="Search site", required=False, default="google")
+            ]
+        ),
+        browser_search
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_navigate",
+            description="Navigate the browser to a specific URL.",
+            category="browser",
+            permission_level=PermissionLevel.CONFIRM,
+            parameters=[
+                ToolParameter(name="url", type="string", description="URL to navigate to")
+            ]
+        ),
+        browser_navigate
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_type",
+            description="Type text into an element in the browser.",
+            category="browser",
+            permission_level=PermissionLevel.CONFIRM,
+            parameters=[
+                ToolParameter(name="selector", type="string", description="DOM selector"),
+                ToolParameter(name="text", type="string", description="Text to type")
+            ]
+        ),
+        browser_type
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_press",
+            description="Press a keyboard key in the browser.",
+            category="browser",
+            permission_level=PermissionLevel.CONFIRM,
+            parameters=[
+                ToolParameter(name="key", type="string", description="Key to press")
+            ]
+        ),
+        browser_press
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_click",
+            description="Click an element in the browser.",
+            category="browser",
+            permission_level=PermissionLevel.CONFIRM,
+            parameters=[
+                ToolParameter(name="selector", type="string", description="DOM selector to click")
+            ]
+        ),
+        browser_click
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_read",
+            description="Read text content from the current page.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[]
+        ),
+        browser_read
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_screenshot",
+            description="Take a screenshot of the current browser page.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[]
+        ),
+        browser_screenshot
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_wait",
+            description="Wait for an element to appear or for the page to load.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="selector", type="string", description="DOM selector", required=False)
+            ]
+        ),
+        browser_wait
+    )
