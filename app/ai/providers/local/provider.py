@@ -161,6 +161,46 @@ class LocalProvider(AIProvider):
         except Exception:
             pass
 
+        # Navigation / New tab routing
+        # Handles: "In the new tab, open leadcode.com", "open leadcode.com in a new tab", "open leadcode.com", etc.
+        try:
+            if re.search(r"^(?:please\s+|just\s+)?(?:open\s+(?:a\s+|the\s+)?new\s+tab|new\s+tab)[.!?]?$", text, re.I):
+                return ClassifiedIntent(
+                    type=IntentType.TOOL_CALL,
+                    confidence=1.0,
+                    tool_name="browser_new_tab",
+                    tool_args={"url": "about:blank"},
+                    requires_cloud=False,
+                )
+
+            from app.tools.browser.domain_aliases import normalize_domain_url
+            nav_match = re.search(
+                r"^(?:in\s+(?:a\s+|the\s+)?new\s+tab,?\s+)?(?:open|navigate\s+to|go\s+to)\s+(.+?)(?:\s+in\s+(?:a\s+|the\s+)?new\s+tab)?[.!?]?$",
+                text,
+                re.I,
+            )
+            if nav_match:
+                target_cand = nav_match.group(1).strip()
+                is_explicit_new_tab = bool(re.search(r"\bnew\s+tab\b", text, re.I))
+                norm_url, was_alias = normalize_domain_url(target_cand)
+                is_web_target = (
+                    was_alias
+                    or norm_url.startswith("http://")
+                    or norm_url.startswith("https://")
+                    or "." in target_cand
+                    or is_explicit_new_tab
+                )
+                if is_web_target:
+                    return ClassifiedIntent(
+                        type=IntentType.TOOL_CALL,
+                        confidence=1.0,
+                        tool_name="browser_navigate",
+                        tool_args={"url": norm_url, "new_tab": is_explicit_new_tab},
+                        requires_cloud=False,
+                    )
+        except Exception:
+            pass
+
         for pattern, tool_name, arg_names, default_args in self._patterns:
             match = pattern.search(text)
             if match:

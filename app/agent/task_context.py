@@ -213,11 +213,12 @@ def is_browser_interaction_command(text: str, context: Optional[BrowserTaskConte
         return False
     if re.search(r"^(?:open|launch)\s+.*?\s+(?:browser\s+)?(?:and|then)\s+search\b", low):
         return False
-    if re.search(r"^(?:search|look\s+up)\s+.*?\s+(?:for|on)\b", low):
-        return False
+    # In-page search on active session
+    if re.search(r"^(?:please\s+|just\s+)?(?:search(?:\s+for)?|look\s+up)\s+(.+)$", low):
+        return True
 
-    # 1. Like / Subscribe / Toggles
-    if re.search(r"^(?:please\s+|just\s+)?(?:like|unlike|thumbs\s+up|thumbs\s+down|dislike)(?:\s+(?:this|the)\s+video|\s+it)?$", low):
+    # 1. Like / Subscribe / Dislike / Share / Toggles
+    if re.search(r"^(?:please\s+|just\s+)?(?:share|like|unlike|thumbs\s+up|thumbs\s+down|dislike)(?:\s+(?:this|the)\s+video|\s+it|\s+button)?$", low):
         return True
     if re.search(r"^(?:please\s+|just\s+)?(?:subscribe|unsubscribe)(?:\s+to\s+(?:this\s+)?channel|\s+to\s+channel)?$", low):
         return True
@@ -239,7 +240,7 @@ def is_browser_interaction_command(text: str, context: Optional[BrowserTaskConte
     # 5. Direct element click ("Open the Settings menu", "Click Settings", "Open Binary Search")
     if re.search(r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|open|select)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button|\s+link|\s+menu|\s+tab|\s+icon|\s+option)?$", low):
         # Avoid matching system/app launches if not active browser page
-        if any(kw in low for kw in ("menu", "tab", "button", "link", "icon", "section", "problem", "settings", "search", "like", "subscribe")):
+        if any(kw in low for kw in ("menu", "tab", "button", "link", "icon", "section", "problem", "settings", "search", "like", "subscribe", "share")):
             return True
         if ctx.last_inspected_elements:
             t_low = low.replace("click", "").replace("open", "").replace("select", "").strip()
@@ -270,11 +271,22 @@ def parse_browser_interaction(text: str, context: Optional[BrowserTaskContext] =
     clean = text.strip()
     low = clean.lower()
 
-    # 1. Like / Subscribe
+    # Search on active page
+    search_m = re.search(r"^(?:please\s+|just\s+)?(?:search(?:\s+for)?|look\s+up)\s+(.+?)(?:\s+(?:on|in)\s+(?:this\s+page|youtube|google))?[.!?]?$", clean, re.I)
+    if search_m:
+        query = search_m.group(1).strip()
+        query = re.sub(r"^for\s+", "", query, flags=re.I).strip()
+        return {"tool_name": "browser_search_page", "tool_args": {"query": query}}
+
+    # 1. Like / Dislike / Share / Subscribe
+    if re.search(r"\b(?:dislike|thumbs\s+down)\b", low):
+        return {"tool_name": "browser_click_element", "tool_args": {"target": "dislike", "context": ""}}
+    if re.search(r"\b(?:unlike)\b", low):
+        return {"tool_name": "browser_click_element", "tool_args": {"target": "unlike", "context": ""}}
     if re.search(r"\b(?:like|thumbs\s+up)\b", low):
         return {"tool_name": "browser_click_element", "tool_args": {"target": "like", "context": ""}}
-    if re.search(r"\b(?:unlike|dislike|thumbs\s+down)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "unlike", "context": ""}}
+    if re.search(r"\b(?:share)\b", low):
+        return {"tool_name": "browser_click_element", "tool_args": {"target": "share", "context": ""}}
     if re.search(r"\b(?:subscribe)\b", low):
         return {"tool_name": "browser_click_element", "tool_args": {"target": "subscribe", "context": ""}}
     if re.search(r"\b(?:unsubscribe)\b", low):

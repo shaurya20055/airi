@@ -463,6 +463,8 @@ def test_14_registry_has_all_browser_tools():
         "browser_select_option",
         "browser_scroll",
         "browser_select_first",
+        "browser_search_page",
+        "browser_new_tab",
     ]
 
     registered = [t.name for t in registry.list_tools()]
@@ -529,3 +531,243 @@ def test_18_browser_policy_sensitive_operations():
     lvl, msg = BrowserPolicy.classify("browser_fill_input", {"target": "Password", "value": "secret123"})
     assert lvl == CorePermissionLevel.CONFIRM
     assert "sensitive" in msg.lower()
+
+
+# ==============================================================================
+# TESTS FOR FIXES: ISSUES 1 - 5 AND ANTI-HALLUCINATION INVARIANT
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_issue1_search_page_submits_query_and_verifies():
+    """Issue 1: Search enters text into search field and submits via Enter."""
+    from app.tools.browser.inspection import browser_search_page
+
+    mock_page = AsyncMock()
+    mock_page.url = "https://www.youtube.com"
+    mock_page.title.return_value = "YouTube"
+
+    search_input = AsyncMock()
+    search_input.count.return_value = 1
+    search_input.is_visible.return_value = True
+
+    submit_btn = AsyncMock()
+    submit_btn.count.return_value = 1
+    submit_btn.is_visible.return_value = True
+
+    def mock_locator(sel):
+        if "input" in sel:
+            m = AsyncMock()
+            m.first = search_input
+            m.count.return_value = 1
+            return m
+        if "button" in sel:
+            m = AsyncMock()
+            m.first = submit_btn
+            m.count.return_value = 1
+            return m
+        m = AsyncMock()
+        m.count.return_value = 0
+        return m
+
+    mock_page.locator.side_effect = mock_locator
+
+    with patch("app.tools.browser.inspection._get_active_page", return_value=mock_page):
+        res = await browser_search_page(query="ElectroBOOM")
+        assert res.success is True
+        assert res.data["verified"] is True
+        assert res.data["query"] == "ElectroBOOM"
+        search_input.fill.assert_called_with("ElectroBOOM")
+        search_input.press.assert_called_with("Enter")
+
+
+def test_issue2_like_dislike_disambiguation():
+    """Issue 2: Like and Dislike buttons are not ambiguous and resolve accurately."""
+    like_el = InspectedElement(
+        ref_id="@e1", index=1, tag="button", role="button",
+        accessible_name="Like this video", visible_text="Like",
+        selector="button#like", element_type="button", pressed=False
+    )
+    dislike_el = InspectedElement(
+        ref_id="@e2", index=2, tag="button", role="button",
+        accessible_name="Dislike this video", visible_text="Dislike",
+        selector="button#dislike", element_type="button", pressed=False
+    )
+    elements = [like_el, dislike_el]
+
+    # Resolving "like this video" must return like_el and NEVER dislike_el
+    res_like = ElementResolver.resolve(elements, target="like this video")
+    assert res_like.status == "found"
+    assert res_like.element.ref_id == "@e1"
+    assert res_like.element.accessible_name == "Like this video"
+
+    # Resolving "dislike this video" must return dislike_el
+    res_dislike = ElementResolver.resolve(elements, target="dislike this video")
+    assert res_dislike.status == "found"
+    assert res_dislike.element.ref_id == "@e2"
+    assert res_dislike.element.accessible_name == "Dislike this video"
+
+
+def test_issue2_already_liked_returns_already_in_state():
+    """Issue 2: Clicking Like on an already liked video returns already_in_state."""
+    already_liked = InspectedElement(
+        ref_id="@e1", index=1, tag="button", role="button",
+        accessible_name="Like this video", visible_text="Like",
+        selector="button#like", element_type="button", pressed=True
+    )
+    elements = [already_liked]
+
+    res = ElementResolver.resolve(elements, target="like this video")
+    assert res.status == "already_in_state"
+    assert res.already_in_state is True
+
+
+def test_issue3_share_button_discovery_and_noise_stripping():
+    """Issue 3: 'share button' query strips noise words and resolves Share button."""
+    clean, ctx_scope, ord_idx, intent = ElementResolver.parse_query("share button")
+    assert clean == "share"
+    assert intent == "share"
+
+    share_el = InspectedElement(
+        ref_id="@e5", index=5, tag="button", role="button",
+        accessible_name="Share", visible_text="Share",
+        selector="button#share", element_type="button", is_icon=True, icon_name="share"
+    )
+    other_el = InspectedElement(
+        ref_id="@e6", index=6, tag="button", role="button",
+        accessible_name="Download", visible_text="Download",
+        selector="button#download", element_type="button"
+    )
+
+    res = ElementResolver.resolve([other_el, share_el], target="share button")
+    assert res.status == "found"
+    assert res.element.ref_id == "@e5"
+    assert res.element.accessible_name == "Share"
+
+
+@pytest.mark.asyncio
+async def test_issue3_share_dialog_verification():
+    """Issue 3: Clicking Share button verifies that share dialog opened."""
+    mock_page = AsyncMock()
+    mock_page.url = "https://www.youtube.com/watch?v=123"
+
+    share_loc = AsyncMock()
+    share_dialog = AsyncMock()
+    share_dialog.count.return_value = 1
+
+    def mock_loc(sel):
+        if "@e1" in sel:
+            return share_loc
+        if "dialog" in sel or "share-target" in sel:
+            return share_dialog
+        m = AsyncMock()
+        m.count.return_value = 0
+        return m
+
+    mock_page.locator.side_effect = mock_loc
+    mock_page.evaluate.return_value = None
+
+    share_el = InspectedElement(
+        ref_id="@e1", index=1, tag="button", role="button",
+        accessible_name="Share", visible_text="Share",
+        selector="button#share", element_type="button", is_icon=True, icon_name="share"
+    )
+
+    ctx = get_browser_task_context()
+    ctx.last_inspected_elements = [share_el]
+
+    with patch("app.tools.browser.inspection._get_active_page", return_value=mock_page):
+        res = await browser_click_element(target="Share")
+        assert res.success is True
+        assert res.data["verified"] is True
+        assert res.data.get("dialog_open") is True
+
+
+def test_issue4_sidebar_recommendation_resolution():
+    """Issue 4: Recommended videos in YouTube sidebar are discovered and resolved."""
+    rec_el = InspectedElement(
+        ref_id="@e10", index=10, tag="a", role="link",
+        accessible_name="How NOT to make an electric guitar",
+        visible_text="How NOT to make an electric guitar",
+        href="/watch?v=abc456",
+        selector="ytd-compact-video-renderer a#video-title",
+        element_type="link",
+        parent_section="Sidebar > Recommendations",
+        container_type="sidebar_recommendation"
+    )
+    elements = [rec_el]
+
+    res = ElementResolver.resolve(elements, target="How NOT to make an electric guitar")
+    assert res.status == "found"
+    assert res.element.ref_id == "@e10"
+    assert res.element.parent_section == "Sidebar > Recommendations"
+
+
+def test_issue5_domain_aliases_normalization():
+    """Issue 5: High-confidence domain phonetic aliases are accurately corrected."""
+    from app.tools.browser.domain_aliases import normalize_domain_url
+
+    url1, c1 = normalize_domain_url("leadcode.com")
+    assert url1 == "https://leetcode.com"
+    assert c1 is True
+
+    url2, c2 = normalize_domain_url("you tube")
+    assert url2 == "https://youtube.com"
+    assert c2 is True
+
+    url3, c3 = normalize_domain_url("git hub.com")
+    assert url3 == "https://github.com"
+    assert c3 is True
+
+    # Arbitrary domains must not be altered
+    url4, c4 = normalize_domain_url("unknownsite12345.org")
+    assert url4 == "https://unknownsite12345.org"
+    assert c4 is False
+
+
+def test_issue5_new_tab_speech_intent_routing():
+    """Issue 5: Spoken requests like 'In the new tab, open leadcode.com' route to browser_navigate with new_tab=True."""
+    provider = LocalProvider()
+
+    intent1 = provider.classify_intent("In the new tab, open leadcode.com")
+    assert intent1.tool_name == "browser_navigate"
+    assert intent1.tool_args["url"] == "https://leetcode.com"
+    assert intent1.tool_args["new_tab"] is True
+
+    intent2 = provider.classify_intent("open leadcode.com in a new tab")
+    assert intent2.tool_name == "browser_navigate"
+    assert intent2.tool_args["url"] == "https://leetcode.com"
+    assert intent2.tool_args["new_tab"] is True
+
+    intent3 = provider.classify_intent("open a new tab")
+    assert intent3.tool_name == "browser_new_tab"
+
+
+@pytest.mark.asyncio
+async def test_antihallucination_rejects_conversational_claims():
+    """Cross-cutting invariant: Orchestrator rejects model claims of action without tool execution."""
+    registry = ToolRegistry()
+    register_all_tools(registry)
+    event_bus = EventBus()
+    perm_mgr = PermissionManager(event_bus=event_bus)
+    store = MemoryStore(":memory:")
+
+    mock_router = AsyncMock()
+    # Model generates pure conversational text claiming it navigated to a tab
+    mock_router.process.return_value = AIResponse(
+        text="Opened a new tab and navigating to leadcode.com.",
+        tool_calls=[],
+        finish_reason="stop",
+    )
+
+    orchestrator = AgentOrchestrator(
+        router=mock_router,
+        tool_registry=registry,
+        memory=store,
+        event_bus=event_bus,
+        permission_manager=perm_mgr,
+    )
+
+    res = await orchestrator.process_input("In the new tab, open leadcode.com")
+    # Must refuse to return the hallucinated completion message and report error
+    assert "no tool was executed" in res.lower() or "unable to complete" in res.lower()
+

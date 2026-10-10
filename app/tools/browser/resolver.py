@@ -111,6 +111,8 @@ class ElementResolver:
         elif re.match(r"^(?:collapse|close\s+(?:the\s+)?accordion)\b", low):
             intent = "collapse"
             clean_target = re.sub(r"^(?:collapse|close\s+(?:the\s+)?accordion)\s+", "", clean_target, flags=re.I).strip()
+        elif re.match(r"^(?:dislike|thumbs\s+down)\b", low):
+            intent = "dislike"
         elif re.match(r"^(?:like|thumbs\s+up)\b", low):
             intent = "like"
         elif re.match(r"^(?:unlike|remove\s+like)\b", low):
@@ -119,6 +121,8 @@ class ElementResolver:
             intent = "subscribe"
         elif re.match(r"^(?:unsubscribe)\b", low):
             intent = "unsubscribe"
+        elif re.match(r"^(?:share)\b", low):
+            intent = "share"
 
         # 2. Extract ordinal if present (e.g. "third problem", "the 2nd item")
         ord_match = re.search(
@@ -152,15 +156,29 @@ class ElementResolver:
         if clean_target.lower().startswith("the "):
             clean_target = clean_target[4:].strip()
 
-        # 5. Clean target for like/subscribe
+        words = clean_target.split()
+        if len(words) > 1:
+            filtered = [w for w in words if w.lower() not in ("button", "btn", "icon", "link")]
+            if filtered:
+                clean_target = " ".join(filtered)
+
+        # 5. Clean target for like/subscribe/dislike/share
         if intent in ("like", "unlike"):
             clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|song|track)\b", "", clean_target, flags=re.I).strip()
             if not clean_target:
                 clean_target = "like"
+        elif intent in ("dislike", "undislike"):
+            clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|song|track)\b", "", clean_target, flags=re.I).strip()
+            if not clean_target:
+                clean_target = "dislike"
         elif intent in ("subscribe", "unsubscribe"):
             clean_target = re.sub(r"\b(?:to\s+)?(?:this\s+)?(?:channel|creator|user)\b", "", clean_target, flags=re.I).strip()
             if not clean_target:
                 clean_target = "subscribe"
+        elif intent == "share":
+            clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|page)\b", "", clean_target, flags=re.I).strip()
+            if not clean_target:
+                clean_target = "share"
         elif intent in ("expand", "collapse"):
             clean_target = re.sub(r"\s+(?:section|accordion|menu|tab)$", "", clean_target, flags=re.I).strip()
 
@@ -321,7 +339,18 @@ class ElementResolver:
                 confidence=top_score,
                 action_intent=action_intent,
                 already_in_state=True,
-                message=f"Already liked.",
+                message="Video is already liked.",
+            )
+
+        # Dislike request on already disliked
+        if action_intent == "dislike" and top_el.pressed is True:
+            return ResolutionResult(
+                status="already_in_state",
+                element=top_el,
+                confidence=top_score,
+                action_intent=action_intent,
+                already_in_state=True,
+                message="Video is already disliked.",
             )
 
         # 6. Ambiguity Check
@@ -388,10 +417,19 @@ class ElementResolver:
                 score -= 0.40
 
         elif intent in ("like", "unlike"):
-            if "like" in name_low or "like" in icon_low or "thumbs" in name_low:
-                score += 0.45
-            elif "dislike" in name_low and intent == "like":
-                score -= 0.50
+            if "dislike" in name_low or "dislike" in icon_low or "thumbs down" in name_low or "thumbs-down" in icon_low:
+                return 0.0
+            if re.search(r"\blike\b", name_low) or icon_low == "like" or "thumbs-up" in icon_low or "thumbs up" in name_low:
+                score += 0.50
+
+        elif intent in ("dislike", "undislike"):
+            if not ("dislike" in name_low or "dislike" in icon_low or "thumbs down" in name_low or "thumbs-down" in icon_low):
+                return 0.0
+            score += 0.50
+
+        elif intent == "share":
+            if "share" in name_low or "share" in icon_low:
+                score += 0.55
 
         elif intent in ("subscribe", "unsubscribe"):
             if "subscribe" in name_low or "subscribed" in name_low:
@@ -412,10 +450,10 @@ class ElementResolver:
         if ph_low and (t_low == ph_low or t_low in ph_low):
             score += 0.40
 
-        # B. Icon / Specific Service Match (e.g. "leetcode", "youtube", "github", "settings")
-        is_icon_target = any(k in t_low for k in ("icon", "logo", "leetcode", "github", "settings", "gear", "cog"))
+        # B. Icon / Specific Service Match (e.g. "leetcode", "youtube", "github", "settings", "share")
+        is_icon_target = any(k in t_low for k in ("icon", "logo", "leetcode", "github", "settings", "gear", "cog", "share"))
         if is_icon_target:
-            for kw in ("leetcode", "github", "youtube", "settings", "search", "filter", "close", "menu"):
+            for kw in ("leetcode", "github", "youtube", "settings", "search", "filter", "close", "menu", "share"):
                 if kw in t_low:
                     if kw in icon_low or kw in href_low or kw in name_low:
                         score += 0.55
@@ -424,11 +462,14 @@ class ElementResolver:
 
         # C. Name and Text Matching
         if t_low:
+            # Prevent "like" from matching inside "dislike"
+            if t_low == "like" and ("dislike" in name_low or "dislike" in text_low):
+                pass
             # Exact match on accessible name or visible text
-            if t_low == name_low or t_low == text_low:
+            elif t_low == name_low or t_low == text_low:
                 score += 0.50
-            # Substring match
-            elif t_low in name_low or t_low in text_low:
+            # Substring match (with whole-word check if target is 'like')
+            elif (t_low in name_low and (t_low != "like" or re.search(r"\blike\b", name_low))) or (t_low in text_low and (t_low != "like" or re.search(r"\blike\b", text_low))):
                 score += 0.35
             # Token overlap
             else:

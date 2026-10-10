@@ -57,6 +57,7 @@ _playwright = None
 _browser = None                      # unused for persistent contexts; kept for compat
 _browser_context = None
 _page = None
+_pages: list = []                    # managed tab pages
 _active_browser_name: Optional[str] = None
 _active_profile_dir: Optional[Path] = None
 _pending_profile_dir: Optional[Path] = None   # profile being launched (for cleanup)
@@ -192,10 +193,11 @@ async def _reset_browser_state(profile_dir: Optional[Path] = None, engine: Optio
     Airi-owned process still holding the profile lock. Profile data is never
     deleted.
     """
-    global _browser_context, _page, _active_browser_name, _active_profile_dir, _pending_profile_dir
+    global _browser_context, _page, _pages, _active_browser_name, _active_profile_dir, _pending_profile_dir
     ctx = _browser_context
     _browser_context = None
     _page = None
+    _pages.clear()
     _active_browser_name = None
     _active_profile_dir = None
     if ctx is not None:
@@ -334,9 +336,13 @@ async def _do_browser_open(browser_name: str) -> ToolResult:
     logger.info("context_create_ok")
 
     # ── Phase: page ───────────────────────────────────────────────────────
+    global _pages
     logger.info("page_create_start")
     pages = ctx.pages
-    _page = pages[0] if pages else await ctx.new_page()
+    _pages = list(pages) if pages else []
+    _page = _pages[0] if _pages else await ctx.new_page()
+    if _page not in _pages:
+        _pages.append(_page)
     logger.info("page_create_ok")
 
     logger.info("browser_ready", browser=resolved_name, engine=engine)
@@ -534,26 +540,98 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
 
 @tool(
     name="browser_navigate",
-    description="Navigate the browser to a specific URL.",
+    description="Navigate the browser to a specific URL. Supports explicit new_tab option.",
     category="browser",
     permission_level=PermissionLevel.SAFE,
     parameters=[
-        ToolParameter(name="url", type="string", description="URL to navigate to")
+        ToolParameter(name="url", type="string", description="URL to navigate to"),
+        ToolParameter(name="new_tab", type="boolean", description="Whether to open in a new tab within the current session", required=False, default=False),
     ]
 )
-async def browser_navigate(url: str) -> ToolResult:
-    global _page
-    if not _page or _page.is_closed():
-        return ToolResult(success=False, error="No active browser session. Call browser_open first.")
-    
-    if not url.startswith("http"):
-        url = "https://" + url
-        
+async def browser_navigate(url: str, new_tab: bool = False) -> ToolResult:
+    global _page, _pages, _browser_context
+    from app.tools.browser.domain_aliases import normalize_domain_url
+
+    normalized_url, was_corrected = normalize_domain_url(url)
+    if not normalized_url.startswith("http") and not normalized_url.startswith("about:"):
+        normalized_url = "https://" + normalized_url
+
+    # Ensure browser session is active
+    is_closed = False
+    if _page is not None and hasattr(_page, "is_closed"):
+        try:
+            ic = _page.is_closed()
+            is_closed = bool(ic)
+        except Exception:
+            is_closed = False
+
+    if _page is None or is_closed:
+        if new_tab:
+            open_res = await browser_open("Firefox")
+            if not open_res.success:
+                return open_res
+        else:
+            return ToolResult(success=False, error="No active browser session. Call browser_open first.")
+
     try:
-        await _page.goto(url, wait_until="domcontentloaded", timeout=15000)
-        return ToolResult(success=True, message=f"Navigated to {url}")
+        if new_tab:
+            if _browser_context is not None and hasattr(_browser_context, "new_page"):
+                new_page = await _browser_context.new_page()
+            elif hasattr(_page, "context") and _page.context and hasattr(_page.context, "new_page"):
+                new_page = await _page.context.new_page()
+            else:
+                new_page = _page
+            _page = new_page
+            if _page not in _pages:
+                _pages.append(_page)
+            logger.info("browser_new_tab_created", total_tabs=len(_browser_context.pages) if (_browser_context and hasattr(_browser_context, "pages")) else len(_pages))
+
+        if normalized_url and normalized_url != "about:blank":
+            await _page.goto(normalized_url, wait_until="domcontentloaded", timeout=15000)
+
+        final_url = _page.url if (hasattr(_page, "url") and isinstance(_page.url, str)) else normalized_url
+        title = ""
+        if hasattr(_page, "title"):
+            try:
+                t_val = _page.title()
+                if asyncio.iscoroutine(t_val):
+                    title = await t_val
+                elif isinstance(t_val, str):
+                    title = t_val
+            except Exception:
+                pass
+
+        # Update BrowserTaskContext
+        try:
+            from app.agent.task_context import get_browser_task_context
+            ctx = get_browser_task_context()
+            ctx.update_navigation(url=final_url, title=title)
+            ctx.active_tab_count = len(_browser_context.pages) if (_browser_context and hasattr(_browser_context, "pages")) else len(_pages)
+        except Exception:
+            pass
+
+        tab_msg = "Opened a new tab and navigated" if new_tab else "Navigated"
+        return ToolResult(
+            success=True,
+            message=f"{tab_msg} to {final_url}.",
+            data={"url": final_url, "title": title, "new_tab": new_tab, "verified": True},
+        )
     except Exception as e:
+        logger.error("browser_navigate_failed", error=str(e), url=normalized_url)
         return ToolResult(success=False, error=str(e))
+
+
+@tool(
+    name="browser_new_tab",
+    description="Open a new tab in Airi's managed browser session and navigate to a URL.",
+    category="browser",
+    permission_level=PermissionLevel.SAFE,
+    parameters=[
+        ToolParameter(name="url", type="string", description="URL to open in the new tab", required=False, default="about:blank")
+    ]
+)
+async def browser_new_tab(url: str = "about:blank") -> ToolResult:
+    return await browser_navigate(url=url, new_tab=True)
 
 @tool(
     name="browser_type",
@@ -701,14 +779,27 @@ def register(registry) -> None:
     registry.register(
         ToolDefinition(
             name="browser_navigate",
-            description="Navigate the browser to a specific URL.",
+            description="Navigate the browser to a specific URL. Supports explicit new_tab option.",
             category="browser",
             permission_level=PermissionLevel.SAFE,
             parameters=[
-                ToolParameter(name="url", type="string", description="URL to navigate to")
+                ToolParameter(name="url", type="string", description="URL to navigate to"),
+                ToolParameter(name="new_tab", type="boolean", description="Whether to open in a new tab within the current session", required=False, default=False),
             ]
         ),
         browser_navigate
+    )
+    registry.register(
+        ToolDefinition(
+            name="browser_new_tab",
+            description="Open a new tab in Airi's managed browser session and navigate to a URL.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="url", type="string", description="URL to open in the new tab", required=False, default="about:blank")
+            ]
+        ),
+        browser_new_tab
     )
     registry.register(
         ToolDefinition(

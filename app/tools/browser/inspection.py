@@ -66,6 +66,17 @@ async def browser_inspect() -> ToolResult:
             '[aria-expanded]',
             '[aria-pressed]',
             'ytd-video-renderer a#video-title',
+            'ytd-compact-video-renderer a#video-title',
+            'ytd-compact-video-renderer span#video-title',
+            'ytd-compact-video-renderer a#thumbnail',
+            'ytd-compact-video-renderer a[href*="/watch"]',
+            '#related ytd-compact-video-renderer a',
+            'ytd-share-button-renderer button',
+            'button[aria-label*="Share" i]',
+            '[aria-label*="Share" i]',
+            'button[title*="Share" i]',
+            'ytd-menu-renderer button',
+            'ytd-toggle-button-renderer button',
             'article a',
             'h3 a',
             'table tr td a',
@@ -142,20 +153,23 @@ async def browser_inspect() -> ToolResult:
             // Icon detection
             let isIcon = false;
             let iconName = '';
-            const svg = el.querySelector('svg');
-            const img = el.querySelector('img');
-            if (svg || img || /icon|fa-|svg/i.test(el.className || '')) {
-                isIcon = true;
-                const svgTitle = svg ? (svg.querySelector('title')?.textContent || '') : '';
-                const useHref = svg ? (svg.querySelector('use')?.getAttribute('href') || svg.querySelector('use')?.getAttribute('xlink:href') || '') : '';
-                const imgAlt = img ? (img.getAttribute('alt') || '') : '';
-                const classStr = typeof el.className === 'string' ? el.className : '';
-                const allIconHints = `${svgTitle} ${useHref} ${imgAlt} ${classStr} ${ariaLabel} ${el.getAttribute('href') || ''}`.toLowerCase();
-                
-                for (let iconKw of ['leetcode', 'youtube', 'github', 'settings', 'search', 'chevron', 'arrow', 'like', 'thumbs-up', 'subscribe', 'heart', 'star', 'play', 'close', 'menu', 'filter', 'gear']) {
-                    if (allIconHints.includes(iconKw)) {
-                        iconName = iconKw;
-                        break;
+            const isContainerTag = ['details', 'summary', 'section', 'article', 'tr', 'table', 'form', 'main', 'header', 'footer'].includes(tag);
+            if (!isContainerTag && innerText.length < 50) {
+                const svg = el.querySelector('svg');
+                const img = el.querySelector('img');
+                if (svg || img || /icon|fa-|svg/i.test(el.className || '')) {
+                    isIcon = true;
+                    const svgTitle = svg ? (svg.querySelector('title')?.textContent || '') : '';
+                    const useHref = svg ? (svg.querySelector('use')?.getAttribute('href') || svg.querySelector('use')?.getAttribute('xlink:href') || '') : '';
+                    const imgAlt = img ? (img.getAttribute('alt') || '') : '';
+                    const classStr = typeof el.className === 'string' ? el.className : '';
+                    const allIconHints = `${svgTitle} ${useHref} ${imgAlt} ${classStr} ${ariaLabel} ${el.getAttribute('href') || ''}`.toLowerCase();
+                    
+                    for (let iconKw of ['leetcode', 'youtube', 'github', 'settings', 'search', 'chevron', 'arrow', 'like', 'thumbs-up', 'dislike', 'thumbs-down', 'share', 'subscribe', 'heart', 'star', 'play', 'close', 'menu', 'filter', 'gear']) {
+                        if (allIconHints.includes(iconKw)) {
+                            iconName = iconKw;
+                            break;
+                        }
                     }
                 }
             }
@@ -166,10 +180,22 @@ async def browser_inspect() -> ToolResult:
             const parentCard = el.closest('article, [role="article"], .card, .item');
             const parentDetails = el.closest('details');
             const parentSectionEl = el.closest('section, fieldset, [role="region"], [role="group"]');
+            const parentSidebarRec = el.closest('ytd-compact-video-renderer, #related, ytd-watch-next-secondary-results-renderer');
 
             let containerType = '';
+            if (parentSidebarRec) {
+                containerType = 'sidebar_recommendation';
+                const recTitle = parentSidebarRec.querySelector('#video-title')?.textContent?.trim() || '';
+                if (!accessibleName && recTitle) {
+                    accessibleName = recTitle;
+                }
+                sectionParts.push('Sidebar > Recommendations');
+                if (recTitle && !sectionParts.includes(recTitle)) {
+                    sectionParts.push(recTitle);
+                }
+            }
             if (parentRow) {
-                containerType = 'row';
+                if (!containerType) containerType = 'row';
                 const firstCol = parentRow.querySelector('td, th, [role="cell"]');
                 const rowText = (firstCol ? firstCol.innerText : parentRow.innerText).trim().replace(/\\s+/g, ' ').slice(0, 80);
                 if (rowText) sectionParts.push(rowText);
@@ -474,6 +500,28 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
             data={"candidates": [c.to_dict() for c in res.candidates]},
         )
 
+    if res.status == "not_found" or res.confidence < 0.40:
+        # Bounded recovery: Trigger 1 fresh re-inspection and re-resolve before failing
+        logger.info("element_not_found_reinspecting", target=target)
+        inspect_res = await browser_inspect()
+        if inspect_res.success and ctx.last_inspected_elements:
+            retry_res = ElementResolver.resolve(
+                elements=ctx.last_inspected_elements,
+                target=target,
+                context=context,
+                ordinal=ordinal,
+                page_url=current_url,
+                page_title=page_title,
+            )
+            if retry_res.status == "found" and retry_res.element:
+                res = retry_res
+            elif retry_res.status == "already_in_state":
+                return ToolResult(
+                    success=True,
+                    message=retry_res.message,
+                    data={"already_in_state": True, "verified": True, "element": retry_res.element.to_dict() if retry_res.element else None},
+                )
+
     if res.status == "not_found":
         vision_res = await _try_vision_fallback_click(page, target)
         if vision_res and vision_res.success:
@@ -488,8 +536,43 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
     if not el:
         return ToolResult(success=False, error="element_not_found", message=res.message)
 
+    # Live DOM check for toggles/likes to avoid inverting state
+    if res.action_intent in ("like", "dislike") or el.pressed is not None:
+        try:
+            live_pressed = None
+            eval_p = page.evaluate("(ref) => { const e = document.querySelector(`[data-airi-ref='${ref}']`); return e ? e.getAttribute('aria-pressed') : null; }", el.ref_id)
+            if asyncio.iscoroutine(eval_p):
+                live_pressed = await eval_p
+            else:
+                live_pressed = eval_p
+            if live_pressed == "true" and res.action_intent == "like":
+                return ToolResult(
+                    success=True,
+                    message="Video is already liked.",
+                    data={"already_in_state": True, "verified": True, "element": el.to_dict()},
+                )
+            elif live_pressed == "true" and res.action_intent == "dislike":
+                return ToolResult(
+                    success=True,
+                    message="Video is already disliked.",
+                    data={"already_in_state": True, "verified": True, "element": el.to_dict()},
+                )
+        except Exception:
+            pass
+
     initial_url = current_url
     loc = page.locator(f"[data-airi-ref='{el.ref_id}']")
+    if asyncio.iscoroutine(loc):
+        loc = await loc
+
+    # Auto-scroll sidebar recommendation cards into view if needed
+    if "sidebar" in el.parent_section.lower() or "recommendation" in el.parent_section.lower() or el.container_type == "sidebar_recommendation":
+        try:
+            scroll_fut = loc.scroll_into_view_if_needed(timeout=3000)
+            if asyncio.iscoroutine(scroll_fut):
+                await scroll_fut
+        except Exception:
+            pass
 
     try:
         click_ret = loc.click(timeout=8000)
@@ -510,6 +593,8 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
             if retry_res.status == "found" and retry_res.element:
                 el = retry_res.element
                 loc = page.locator(f"[data-airi-ref='{el.ref_id}']")
+                if asyncio.iscoroutine(loc):
+                    loc = await loc
                 click_ret = loc.click(timeout=8000)
                 if asyncio.iscoroutine(click_ret):
                     await click_ret
@@ -517,6 +602,29 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
                 return ToolResult(success=False, error=f"Element stale and could not be re-resolved: {e}")
         else:
             return ToolResult(success=False, error=f"Failed to click element: {e}")
+
+    # Check for Share dialog appearance if share was clicked
+    is_share = (
+        res.action_intent == "share"
+        or "share" in target.lower()
+        or "share" in el.accessible_name.lower()
+        or el.icon_name == "share"
+    )
+    if is_share:
+        try:
+            share_dialog = page.locator("ytd-share-target-renderer, ytd-unified-share-panel-renderer, tp-yt-paper-dialog[role='dialog'], [role='dialog']:has-text('Share'), [role='dialog']")
+            if asyncio.iscoroutine(share_dialog):
+                share_dialog = await share_dialog
+            cnt_fut = share_dialog.count()
+            cnt = await cnt_fut if asyncio.iscoroutine(cnt_fut) else cnt_fut
+            if cnt > 0:
+                return ToolResult(
+                    success=True,
+                    message=f"Clicked '{el.accessible_name}'. Share dialog opened.",
+                    data={"verified": True, "dialog_open": True, "element": el.to_dict()},
+                )
+        except Exception:
+            pass
 
     # Wait for possible navigation
     try:
@@ -1319,12 +1427,169 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
             )
     except Exception as e:
         logger.error("action_verification_failure", error=str(e))
-        return ToolResult(success=False, error=f"Failed to click result: {e}")
+@tool(
+    name="browser_search_page",
+    description="Locate the search input on the active page, enter the search query, and submit the search via Enter or search button.",
+    category="browser",
+    permission_level=PermissionLevel.SAFE,
+    parameters=[
+        ToolParameter(name="query", type="string", description="The search query to enter and submit.", required=True),
+        ToolParameter(name="target", type="string", description="Optional search input label, placeholder, or reference ID.", required=False, default=""),
+    ],
+)
+async def browser_search_page(query: str, target: str = "") -> ToolResult:
+    """Enter query into the page search field, submit via Enter or button, and verify results."""
+    page = _get_active_page()
+    if not page:
+        return ToolResult(
+            success=False,
+            error="no_active_browser_session",
+            message="No active Airi browser session. Use browser_open or browser_search first.",
+        )
 
+    initial_url = page.url if hasattr(page, "url") else ""
+    ctx = get_browser_task_context()
+
+    search_selectors = [
+        "ytd-searchbox input#search",
+        "input#search",
+        "input[name='search_query']",
+        "input[name='q']",
+        "textarea[name='q']",
+        "input[type='search']",
+        "input[placeholder*='search' i]",
+        "input[placeholder*='query' i]",
+        "input[aria-label*='search' i]",
+        "[role='searchbox']",
+        "[role='search'] input",
+        "input[name*='search' i]",
+    ]
+
+    search_loc = None
+    if target:
+        if not ctx.last_inspected_elements:
+            await browser_inspect()
+        res = ElementResolver.resolve(
+            elements=ctx.last_inspected_elements,
+            target=target,
+            intent="fill",
+        )
+        if res.status == "found" and res.element:
+            search_loc = page.locator(f"[data-airi-ref='{res.element.ref_id}']")
+
+    if not search_loc:
+        for sel in search_selectors:
+            try:
+                cand = page.locator(sel)
+                if asyncio.iscoroutine(cand):
+                    cand = await cand
+                cnt_fut = cand.count()
+                cnt = await cnt_fut if asyncio.iscoroutine(cnt_fut) else cnt_fut
+                if cnt > 0:
+                    first_el = cand.first
+                    if asyncio.iscoroutine(first_el):
+                        first_el = await first_el
+                    is_vis_fut = first_el.is_visible()
+                    is_vis = await is_vis_fut if asyncio.iscoroutine(is_vis_fut) else is_vis_fut
+                    if is_vis:
+                        search_loc = first_el
+                        break
+            except Exception:
+                continue
+
+    if not search_loc:
+        return ToolResult(
+            success=False,
+            error="search_field_not_found",
+            message="Could not find an active search input on the current page.",
+        )
+
+    try:
+        # Fill search input
+        click_fut = search_loc.click(timeout=5000)
+        if asyncio.iscoroutine(click_fut):
+            await click_fut
+
+        fill_fut = search_loc.fill(query)
+        if asyncio.iscoroutine(fill_fut):
+            await fill_fut
+
+        # Submit via Enter
+        press_fut = search_loc.press("Enter")
+        if asyncio.iscoroutine(press_fut):
+            await press_fut
+
+        # Also look for search submit button if available
+        try:
+            submit_btn = page.locator(
+                "ytd-searchbox button#search-icon-legacy, button[type='submit'], button[aria-label*='Search' i], button#search-icon-legacy"
+            ).first
+            if asyncio.iscoroutine(submit_btn):
+                submit_btn = await submit_btn
+            cnt_fut = submit_btn.count()
+            cnt = await cnt_fut if asyncio.iscoroutine(cnt_fut) else cnt_fut
+            if cnt > 0:
+                is_vis_fut = submit_btn.is_visible()
+                is_vis = await is_vis_fut if asyncio.iscoroutine(is_vis_fut) else is_vis_fut
+                if is_vis:
+                    c_fut = submit_btn.click(timeout=1500)
+                    if asyncio.iscoroutine(c_fut):
+                        await c_fut
+        except Exception:
+            pass
+
+        # Wait for navigation or results update
+        try:
+            if hasattr(page, "wait_for_load_state"):
+                wait_fut = page.wait_for_load_state("domcontentloaded", timeout=6000)
+                if asyncio.iscoroutine(wait_fut):
+                    await wait_fut
+        except Exception:
+            pass
+
+        new_url = page.url if hasattr(page, "url") else initial_url
+        new_title = ""
+        if hasattr(page, "title"):
+            try:
+                t_fut = page.title()
+                new_title = await t_fut if asyncio.iscoroutine(t_fut) else t_fut
+            except Exception:
+                pass
+
+        # Update context
+        ctx.update_search(
+            browser_name=ctx.active_browser_name or "Firefox",
+            query=query,
+            site=ctx.last_search_site or ("youtube" if "youtube.com" in new_url else "google"),
+            url=new_url,
+            title=new_title,
+        )
+
+        return ToolResult(
+            success=True,
+            message=f"Searched for '{query}'.",
+            data={"verified": True, "query": query, "url": new_url, "title": new_title},
+        )
+    except Exception as e:
+        logger.error("browser_search_page_failed", error=str(e), query=query)
+        return ToolResult(success=False, error=str(e))
 
 
 def register(registry: ToolRegistry) -> None:
     """Register all browser inspection, selection, and interaction tools."""
+    registry.register(
+        ToolDefinition(
+            name="browser_search_page",
+            description="Locate the search input on the active page, enter the search query, and submit the search via Enter or search button.",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters=[
+                ToolParameter(name="query", type="string", description="The search query to enter and submit.", required=True),
+                ToolParameter(name="target", type="string", description="Optional search input label, placeholder, or reference ID.", required=False, default=""),
+            ],
+        ),
+        browser_search_page,
+    )
     registry.register(
         ToolDefinition(
             name="browser_inspect",

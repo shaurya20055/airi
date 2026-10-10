@@ -1,8 +1,9 @@
 """Agent orchestrator — main loop for processing user input."""
 from __future__ import annotations
 
-import structlog
 import copy
+import re
+import structlog
 
 from app.ai.router import AIRouter
 from app.ai.schemas import AIResponse
@@ -42,9 +43,34 @@ class AgentOrchestrator:
         self.executor = ToolExecutor(tool_registry, event_bus)
         self.pending_task = None
 
+    @staticmethod
+    def _is_action_request(text: str) -> bool:
+        """Check if user instruction is an action-oriented command requiring execution."""
+        clean = text.strip().lower()
+        if not clean:
+            return False
+        action_prefixes = (
+            "open", "launch", "start", "run", "click", "select", "press",
+            "search", "navigate", "go to", "close", "play", "type", "fill",
+            "expand", "collapse", "like", "dislike", "subscribe", "unsubscribe",
+            "share", "scroll", "set", "change", "turn", "mute", "unmute",
+            "lock", "shutdown", "reboot", "suspend"
+        )
+        words = re.findall(r"\b\w+\b", clean)
+        if words and words[0] in action_prefixes:
+            return True
+        if any(phrase in clean for phrase in (
+            "new tab", "in the new tab", "in a new tab", "search for", "look up",
+            "click on", "tap on", "like this", "dislike this", "subscribe to",
+            "open the", "click the", "expand the", "scroll down", "scroll up"
+        )):
+            return True
+        return False
+
     async def process_input(self, text: str, source: str = "cli") -> str:
         self._tools_executed_this_turn = False
         self._last_tool_results: list[Any] = []
+        self._current_turn_actions: list[dict] = []
 
         try:
             from app.agent.task_context import get_browser_task_context
@@ -162,9 +188,35 @@ class AgentOrchestrator:
                             "i have played",
                             "i selected",
                             "i launched",
+                            "opened a new tab",
+                            "open a new tab",
+                            "opening a new tab",
+                            "opened new tab",
+                            "navigating to",
+                            "navigated to",
+                            "i navigated",
+                            "i have navigated",
+                            "i liked",
+                            "liked the video",
+                            "i disliked",
+                            "disliked the video",
+                            "subscribed",
+                            "i subscribed",
+                            "subscribed to",
+                            "searched for",
+                            "i searched",
+                            "searching for",
                         ]
                         if any(phrase in low_text for phrase in completion_phrases) or low_text in ("done.", "done!", "done", "completed."):
                             hallucinated = True
+                        elif self._is_action_request(text) and not self._tools_executed_this_turn:
+                            # Strict invariant: When user requested an action, any response claiming execution without tools is a hallucination
+                            claim_patterns = (
+                                r"\b(?:opened|navigated|navigating|clicked|selected|liked|disliked|subscribed|searched|launched|running)\b",
+                                r"\b(?:i have|i've|i did|already)\b",
+                            )
+                            if any(re.search(cp, low_text) for cp in claim_patterns):
+                                hallucinated = True
 
                     if hallucinated and not self._tools_executed_this_turn:
                         logger.warning("hallucinated_tool_success_detected", text=cleaned_text, step=step)
@@ -281,6 +333,7 @@ class AgentOrchestrator:
             import json
             if result.success:
                 self._tools_executed_this_turn = True
+                self._current_turn_actions.append({"tool": tool_name, "args": tool_call.arguments, "success": True, "result": result})
                 res_dict = {"success": True}
                 if result.message:
                     res_dict["message"] = result.message
@@ -290,6 +343,7 @@ class AgentOrchestrator:
                 self.context.add_tool_result(tool_call.id, msg, True)
                 results.append(result.message or f"{tool_name} succeeded.")
             else:
+                self._current_turn_actions.append({"tool": tool_name, "args": tool_call.arguments, "success": False, "result": result})
                 res_dict = {"success": False, "error": result.error or "Unknown error"}
                 if result.message:
                     res_dict["message"] = result.message
