@@ -78,10 +78,10 @@ class LocalProvider(AIProvider):
                 re.I,
             ), "browser_search", ["browser_name", "site", "query"], {}),
 
-            # Applications ─ intentionally narrow: only a single app name token,
-            # not "open YouTube and subscribe to ElectroBOOM" (goes to LLM)
+            # Applications ─ supports multi-word app names (e.g., "Burp Suite", "helm browser", "Burp sweet"),
+            # while compound actions with "and", "then", "search", "run" are deferred to complex routing.
             (re.compile(
-                r"^(?:open|launch|start|run)\s+([\w.\-]+)\s*$",
+                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
                 re.I,
             ), "launch_application", ["name"], {}),
 

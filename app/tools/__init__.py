@@ -26,8 +26,11 @@ def register_all_tools(registry: ToolRegistry) -> None:
             package = importlib.import_module(package_name)
             for _, module_name, is_pkg in pkgutil.walk_packages(package.__path__, package.__name__ + '.'):
                 if not is_pkg:
-                    module = importlib.import_module(module_name)
-                    if hasattr(module, 'register'):
-                        module.register(registry)
+                    try:
+                        module = importlib.import_module(module_name)
+                        if hasattr(module, 'register'):
+                            module.register(registry)
+                    except Exception:
+                        pass
         except ImportError as e:
             print(f"Warning: Failed to import tools from {package_name}: {e}")

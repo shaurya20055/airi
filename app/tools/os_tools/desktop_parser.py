@@ -1,8 +1,14 @@
 from __future__ import annotations
-import os
-import glob
-from dataclasses import dataclass, field
 import configparser
+import glob
+import os
+import shlex
+import shutil
+from dataclasses import dataclass, field
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 
 @dataclass
 class DesktopEntry:
@@ -15,14 +21,24 @@ class DesktopEntry:
     try_exec: str = ""
     no_display: bool = False
     hidden: bool = False
+    app_id: str = ""
+
+    def __post_init__(self):
+        if not self.app_id and self.path:
+            base = os.path.basename(self.path)
+            self.app_id = base[:-8] if base.endswith(".desktop") else base
+
 
 class DesktopParser:
     def __init__(self):
         self.search_paths = [
             os.path.expanduser("~/.local/share/applications/"),
+            os.path.expanduser("~/.local/share/flatpak/exports/share/applications/"),
             "/usr/local/share/applications/",
-            "/usr/share/applications/"
+            "/usr/share/applications/",
+            "/var/lib/flatpak/exports/share/applications/",
         ]
+        self._cached_entries: list[DesktopEntry] | None = None
 
     def _clean_exec(self, exec_str: str) -> str:
         if not exec_str:
@@ -61,7 +77,9 @@ class DesktopParser:
             try_exec = entry.get("TryExec", "")
             no_display = entry.getboolean("NoDisplay", fallback=False)
             hidden = entry.getboolean("Hidden", fallback=False)
-            
+            base = os.path.basename(path)
+            app_id = base[:-8] if base.endswith(".desktop") else base
+
             return DesktopEntry(
                 path=path,
                 name=name,
@@ -71,14 +89,18 @@ class DesktopParser:
                 exec=exec_str,
                 try_exec=try_exec,
                 no_display=no_display,
-                hidden=hidden
+                hidden=hidden,
+                app_id=app_id,
             )
         except Exception:
             return None
 
-    def discover_all(self) -> list[DesktopEntry]:
+    def discover_all(self, force_refresh: bool = False) -> list[DesktopEntry]:
+        if not force_refresh and self._cached_entries is not None:
+            return self._cached_entries
+
         entries = []
-        seen_names = set()
+        seen_ids = set()
         
         for base_path in self.search_paths:
             if not os.path.isdir(base_path):
@@ -87,10 +109,33 @@ class DesktopParser:
             for filepath in glob.glob(os.path.join(base_path, "**/*.desktop"), recursive=True):
                 entry = self.parse_file(filepath)
                 if entry and not entry.hidden and not entry.no_display:
-                    # Avoid duplicates by path basename
-                    basename = os.path.basename(filepath)
-                    if basename not in seen_names:
+                    # Avoid duplicates by app_id / filename
+                    if entry.app_id not in seen_ids:
                         entries.append(entry)
-                        seen_names.add(basename)
-                        
+                        seen_ids.add(entry.app_id)
+
+        self._cached_entries = entries
+        logger.info("application_catalog_refresh", count=len(entries), paths=self.search_paths)
         return entries
+
+    def refresh(self) -> list[DesktopEntry]:
+        """Invalidate cache and re-scan application catalog."""
+        return self.discover_all(force_refresh=True)
+
+    @staticmethod
+    def is_valid_candidate(entry: DesktopEntry) -> bool:
+        """Validate if a discovered candidate's executable exists on the system."""
+        if entry.try_exec:
+            if shutil.which(entry.try_exec) or os.path.isfile(entry.try_exec):
+                return True
+        if entry.exec:
+            try:
+                parts = shlex.split(entry.exec)
+                if parts:
+                    bin_name = parts[0]
+                    if shutil.which(bin_name) or (os.path.isfile(bin_name) and os.access(bin_name, os.X_OK)):
+                        return True
+            except Exception:
+                pass
+        return False
+

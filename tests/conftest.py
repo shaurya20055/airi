@@ -27,7 +27,7 @@ def event_bus():
 def tool_registry():
     """Provide a clean ToolRegistry with one mock tool registered."""
     import app.tools.registry as mod
-    # Clear the global registry instance
+    old_tools = dict(mod.registry._tools)
     mod.registry._tools.clear()
     
     # Register manually to avoid decorator binding issues
@@ -47,6 +47,7 @@ def tool_registry():
     mod.registry.register(defn, mock_tool_fn)
     yield mod.registry
     mod.registry._tools.clear()
+    mod.registry._tools.update(old_tools)
 
 
 @pytest.fixture
