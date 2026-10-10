@@ -146,6 +146,21 @@ class LocalProvider(AIProvider):
         except Exception:
             pass
 
+        # Contextual general browser interaction routing when active session exists
+        try:
+            from app.agent.task_context import is_browser_interaction_command, parse_browser_interaction
+            if is_browser_interaction_command(text):
+                parsed = parse_browser_interaction(text)
+                return ClassifiedIntent(
+                    type=IntentType.TOOL_CALL,
+                    confidence=1.0,
+                    tool_name=parsed["tool_name"],
+                    tool_args=parsed["tool_args"],
+                    requires_cloud=False,
+                )
+        except Exception:
+            pass
+
         for pattern, tool_name, arg_names, default_args in self._patterns:
             match = pattern.search(text)
             if match:

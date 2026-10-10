@@ -18,16 +18,18 @@ class BrowserPolicy:
     @classmethod
     def classify(cls, tool_name: str, args: dict[str, Any]) -> tuple[PermissionLevel, str]:
         # Sensitive clicks
-        if tool_name == "browser_click":
-            selector = str(args.get("selector", ""))
-            if SENSITIVE_SELECTORS.search(selector):
-                return PermissionLevel.CONFIRM, f"Clicking sensitive element '{selector}'"
+        if tool_name in ("browser_click", "browser_click_element"):
+            target = str(args.get("target", "") or args.get("selector", ""))
+            context = str(args.get("context", ""))
+            if SENSITIVE_SELECTORS.search(target) or SENSITIVE_SELECTORS.search(context):
+                return PermissionLevel.CONFIRM, f"Clicking sensitive element '{target}'"
 
-        # Sensitive typing
-        if tool_name == "browser_type":
-            selector = str(args.get("selector", ""))
-            if SENSITIVE_SELECTORS.search(selector):
-                return PermissionLevel.CONFIRM, f"Typing into sensitive field '{selector}'"
+        # Sensitive typing and input filling
+        if tool_name in ("browser_type", "browser_fill_input"):
+            target = str(args.get("target", "") or args.get("selector", ""))
+            val = str(args.get("value", "") or args.get("text", ""))
+            if SENSITIVE_SELECTORS.search(target) or SENSITIVE_SELECTORS.search(val):
+                return PermissionLevel.CONFIRM, f"Filling sensitive field '{target}'"
 
         # Sensitive navigation
         if tool_name == "browser_navigate":
