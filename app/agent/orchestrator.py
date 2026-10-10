@@ -1,9 +1,8 @@
 """Agent orchestrator — main loop for processing user input."""
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
+import copy
 
 from app.ai.router import AIRouter
 from app.ai.schemas import AIResponse
@@ -15,18 +14,16 @@ from app.core.events.events import (
     AssistantThinking,
     UserInputReceived,
 )
-from app.core.permissions.manager import PermissionManager
+from app.core.permissions.manager import PermissionLevel, PermissionManager
 from app.memory.store import MemoryStore
 from app.tools.registry import ToolRegistry
 
 logger = structlog.get_logger(__name__)
 
+MAX_AGENT_STEPS = 10
 
 class AgentOrchestrator:
-    """The main agent loop for processing input and managing execution.
-
-    Flow: Input → Classify → (Tool Call | AI Response) → Verify → Respond
-    """
+    """The main agent loop for processing input and managing execution."""
 
     def __init__(
         self,
@@ -43,93 +40,148 @@ class AgentOrchestrator:
         self.permission_manager = permission_manager
         self.context = AgentContext()
         self.executor = ToolExecutor(tool_registry, event_bus)
+        self.pending_task = None
 
     async def process_input(self, text: str, source: str = "cli") -> str:
-        """Process user input through the full agent pipeline.
-
-        Args:
-            text: The user's input text.
-            source: Where the input came from ('cli', 'voice', 'text').
-
-        Returns:
-            The assistant's response text.
-        """
         logger.info("Processing input", source=source, text=text)
+        if hasattr(self, '_tools_executed_this_turn'):
+            delattr(self, '_tools_executed_this_turn')
 
-        # 1. Publish input event
-        await self.event_bus.publish(
-            UserInputReceived(text=text, input_source=source)
-        )
+        await self.event_bus.publish(UserInputReceived(text=text, input_source=source))
+        
+        if self.pending_task:
+            self.context.add_user_message(text)
+            response = await self.pending_task.handle_input(text)
+            if response is not None:
+                self.context.add_assistant_message(response)
+                await self.event_bus.publish(AssistantResponseReady(text=response))
+            if self.pending_task.is_complete:
+                self.pending_task = None
+            return response or "Task completed."
 
-        # 2. Add to conversation context
         self.context.add_user_message(text)
-
-        # 3. Signal thinking
-        await self.event_bus.publish(AssistantThinking())
-
-        # 4. Route through AI
         tools_schema = self.tool_registry.to_openai_tools()
-        response = await self.router.process(
-            text,
-            conversation=self.context.get_messages(),
-            tools=tools_schema,
-        )
 
-        # 5. Handle tool calls
-        if response.tool_calls:
-            return await self._handle_tool_calls(response, tools_schema)
+        for step in range(MAX_AGENT_STEPS):
+            await self.event_bus.publish(AssistantThinking())
 
-        # 6. Pure text response
-        if response.text:
-            self.context.add_assistant_message(response.text)
-            await self.event_bus.publish(
-                AssistantResponseReady(text=response.text)
+            # We pass text to router only for classification, but we don't want router to mutate our context list.
+            # So we pass a copy, and let router do whatever. We already added the user message.
+            messages_copy = copy.deepcopy(self.context.get_messages())
+            # router appends `text` if provided. Since we already appended, we pass empty text for conversation,
+            # BUT router uses `text` for classification.
+            # Looking at router.py: `intent = await self.classify_intent(text)`.
+            # So we pass `text` on step 0, but to prevent it from appending it AGAIN to messages_copy,
+            # we must pop the last one we added from messages_copy, so router can append it!
+            if step == 0:
+                messages_copy.pop()
+                current_text = text
+            else:
+                current_text = ""
+
+            response = await self.router.process(
+                current_text,
+                conversation=messages_copy,
+                tools=tools_schema,
             )
 
-        return response.text or "I'm not sure how to help with that."
+            if response.tool_calls:
+                self._tools_executed_this_turn = True
+                interactive_response, continue_loop, final_results = await self._handle_tool_calls(response, tools_schema)
+                if interactive_response is not None:
+                    return interactive_response
+                if not continue_loop:
+                    # Return the aggregated results as the final response
+                    return final_results
+            else:
+                if response.text:
+                    # Check for hallucinated tool success
+                    hallucinated = False
+                    # Basic heuristic: contains tool name + "succeed" or "success" without any tools executed
+                    if "succeed" in response.text.lower() or "success" in response.text.lower() or "execut" in response.text.lower() or "done" in response.text.lower():
+                        for tool in self.tool_registry.list_tools():
+                            if tool.name in response.text:
+                                hallucinated = True
+                                break
+                    if hallucinated and not hasattr(self, '_tools_executed_this_turn'):
+                        logger.warning("hallucinated_tool_success", text=response.text)
+                        self.context.add_assistant_message(response.text)
+                        msg = "Tool call required to perform this task. You claimed success but no tool was executed. You must emit a valid JSON tool call."
+                        self.context.add_user_message(msg)
+                        continue
+
+                    self.context.add_assistant_message(response.text)
+                    await self.event_bus.publish(AssistantResponseReady(text=response.text))
+                    return response.text
+                return "Task completed."
+                
+        final_msg = "I've reached my maximum number of steps for this task."
+        self.context.add_assistant_message(final_msg)
+        await self.event_bus.publish(AssistantResponseReady(text=final_msg))
+        return final_msg
 
     async def _handle_tool_calls(
         self, response: AIResponse, tools_schema: list[dict]
-    ) -> str:
-        """Execute tool calls and build a response."""
+    ) -> tuple[str | None, bool, str]:
+        """Validate, permission-check, execute, and append results.
+        Returns (interactive_response, continue_loop, final_results).
+        """
         results: list[str] = []
+        should_continue = True
 
         for tool_call in response.tool_calls:
-            tool_entry = self.tool_registry.get_tool(tool_call.name)
+            tool_name = tool_call.name
 
-            # Permission check
-            if tool_entry:
-                definition, _ = tool_entry
-                perm_level = definition.permission_level
-                # Map tool permission to core permission level
-                from app.core.permissions.manager import PermissionLevel
-                core_level = PermissionLevel(perm_level.value)
-                allowed = await self.permission_manager.request_permission(
-                    tool_call.name, tool_call.arguments, core_level
-                )
-                if not allowed:
-                    msg = f"Permission denied for {tool_call.name}."
-                    self.context.add_tool_result(tool_call.id, msg, False)
-                    results.append(msg)
-                    continue
-
-            # Execute
-            result = await self.executor.execute(
-                tool_call.name, tool_call.arguments
-            )
-
-            if result.success:
-                msg = result.message or f"Done. {tool_call.name} completed."
-                if result.data is not None:
-                    msg = f"{msg} Result: {result.data}"
-                self.context.add_tool_result(tool_call.id, msg, True)
-                results.append(msg)
-            else:
-                msg = result.error or f"{tool_call.name} failed."
+            tool_entry = self.tool_registry.get_tool(tool_name)
+            if not tool_entry:
+                msg = f"I tried to call '{tool_name}' but that tool doesn't exist."
                 self.context.add_tool_result(tool_call.id, msg, False)
-                results.append(f"Error: {msg}")
+                results.append(msg)
+                continue
 
-        final = " ".join(results) if results else "Done."
-        self.context.add_assistant_message(final)
-        await self.event_bus.publish(AssistantResponseReady(text=final))
-        return final
+            definition, _ = tool_entry
+            core_level = PermissionLevel(definition.permission_level.value)
+            allowed = await self.permission_manager.request_permission(
+                tool_name, tool_call.arguments, core_level
+            )
+            if not allowed:
+                msg = f"Permission denied for '{tool_name}'."
+                self.context.add_tool_result(tool_call.id, msg, False)
+                results.append(msg)
+                should_continue = False
+                continue
+
+            result = await self.executor.execute(tool_name, tool_call.arguments)
+
+            if getattr(result, 'task', None):
+                self.pending_task = result.task
+                if hasattr(self.pending_task, 'permission_manager'):
+                    pass
+                self.pending_task.permission_manager = self.permission_manager
+                task_response = await self.pending_task.start()
+                self.context.add_tool_result(tool_call.id, f"Started interactive task. Message: {task_response}", True)
+                self.context.add_assistant_message(task_response)
+                await self.event_bus.publish(AssistantResponseReady(text=task_response))
+                return task_response, False, ""
+
+            import json
+            if result.success:
+                # Return the structured result back to the model as JSON string
+                res_dict = {"success": True}
+                if result.message:
+                    res_dict["message"] = result.message
+                if result.data is not None:
+                    res_dict["data"] = result.data
+                msg = json.dumps(res_dict)
+                self.context.add_tool_result(tool_call.id, msg, True)
+                results.append(f"{tool_name} succeeded.")
+            else:
+                res_dict = {"success": False, "error": result.error or "Unknown error"}
+                msg = json.dumps(res_dict)
+                self.context.add_tool_result(tool_call.id, msg, False)
+                results.append(f"Error: {result.error or 'Unknown error'}")
+                should_continue = False
+
+        final_msg = " ".join(results)
+        self.context.add_assistant_message(final_msg)
+        return None, should_continue, final_msg

@@ -10,6 +10,8 @@ ENV/
 
 data/*.db
 data/*.sqlite3
+data/*.wav
+data/diagnostics/
 models/
 
 .pytest_cache/

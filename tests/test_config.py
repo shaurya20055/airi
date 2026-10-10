@@ -46,3 +46,15 @@ def test_openai_fallback_to_local(monkeypatch):
     s = get_settings()
     assert s.ai_provider == AIProviderType.LOCAL
     mod._settings_instance = None
+
+
+def test_inference_device_settings():
+    """Verify inference devices default to stable config: GPU for local AI, CPU int8 for STT, CPU for TTS."""
+    s = Settings()
+    assert s.local_ai_device == "gpu"
+    assert s.stt_device == "cpu"
+    assert s.stt_compute_type == "int8"
+    assert s.tts_device == "cpu"
+    assert s.save_diagnostic_audio is False
+    assert s.diagnostic_audio_dir == "data/diagnostics/audio"
+

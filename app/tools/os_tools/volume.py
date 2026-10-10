@@ -12,7 +12,13 @@ from app.tools.registry import PermissionLevel, ToolParameter, ToolRegistry, Too
     category="OS",
     permission_level=PermissionLevel.SAFE,
     parameters=[
-        ToolParameter(name="level", type="integer", description="Volume level between 0 and 100.")
+        ToolParameter(
+            name="level",
+            type="integer",
+            description="Volume level between 0 and 100.",
+            minimum=0,
+            maximum=100,
+        )
     ]
 )
 async def set_volume(level: int) -> ToolResult:

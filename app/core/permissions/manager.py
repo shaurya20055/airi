@@ -157,18 +157,9 @@ class PermissionManager:
 
     # -- policy helpers ----------------------------------------------------
 
-    def effective_level(self, tool_name: str, declared: PermissionLevel) -> PermissionLevel:
-        """Declared level combined with blocks/overrides. Overrides can only tighten."""
-        if tool_name in self._blocked_tools:
-            return PermissionLevel.BLOCKED
-        override = self._overrides.get(tool_name)
-        if override is None:
-            return declared
-        return PermissionLevel.strictest(declared, override)
-
-    def check_permission(self, tool_name: str, level: PermissionLevel) -> bool:
+    def check_permission(self, tool_name: str, level: PermissionLevel, args: dict[str, Any] | None = None) -> bool:
         """True if the tool may run *without* prompting."""
-        level = self.effective_level(tool_name, level)
+        level = self.effective_level(tool_name, level, args)
         if level == PermissionLevel.BLOCKED:
             return False
         if level == PermissionLevel.SAFE:
@@ -177,15 +168,45 @@ class PermissionManager:
             return True
         return False
 
+    def effective_level(self, tool_name: str, declared: PermissionLevel, args: dict[str, Any] | None = None) -> PermissionLevel:
+        """Declared level combined with blocks/overrides and dynamic policies."""
+        if tool_name in self._blocked_tools:
+            return PermissionLevel.BLOCKED
+            
+        # Dynamic policy for commands
+        if tool_name == "execute_command" and args:
+            from app.core.permissions.command_policy import CommandPolicy
+            dynamic_level, _ = CommandPolicy.classify(args)
+            declared = PermissionLevel.strictest(declared, dynamic_level)
+            
+        if tool_name == "execute_shell":
+            declared = PermissionLevel.DANGEROUS
+            
+        override = self._overrides.get(tool_name)
+        if override is None:
+            return declared
+        return PermissionLevel.strictest(declared, override)
+
     async def request_permission(
         self, tool_name: str, args: dict[str, Any], level: PermissionLevel, description: str = ""
     ) -> bool:
         """Return True if the tool may run, prompting the user if needed."""
-        effective = self.effective_level(tool_name, level)
+        # Dynamic policy reason evaluation
+        if tool_name == "execute_command" and args:
+            from app.core.permissions.command_policy import CommandPolicy
+            dynamic_level, reason = CommandPolicy.classify(args)
+            if reason:
+                description = f"{description} ({reason})" if description else reason
+
+        if tool_name == "execute_shell":
+            reason = "Raw shell execution is highly dangerous"
+            description = f"{description} ({reason})" if description else reason
+
+        effective = self.effective_level(tool_name, level, args)
         if effective == PermissionLevel.BLOCKED:
             logger.info("permission_blocked", tool=tool_name)
             return False
-        if self.check_permission(tool_name, effective):
+        if self.check_permission(tool_name, effective, args):
             return True
 
         request = PermissionRequest(tool_name=tool_name, level=effective, args=args, description=description)

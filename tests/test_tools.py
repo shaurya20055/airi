@@ -49,7 +49,7 @@ async def test_execute_valid_tool(tool_registry):
 async def test_execute_missing_tool(tool_registry):
     result = await tool_registry.execute("nonexistent", {})
     assert not result.success
-    assert "not found" in result.error.lower()
+    assert "unknown" in result.error.lower() or "not found" in result.error.lower()
 
 
 @pytest.mark.asyncio

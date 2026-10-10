@@ -32,20 +32,23 @@ class LocalProvider(AIProvider):
         tool_name must match exactly what's registered in ToolRegistry.
         """
         self.runtime = runtime
+        # Matches: "35%", "35 %", "35 percent", or plain "35"
+        _num = r"(\d+)\s*(?:%|percent\b)?"
+
         self._patterns: list[tuple[re.Pattern, str, list[str], dict]] = [
             # Volume -------------------------------------------------------
             (re.compile(
-                r"(?:set|change)\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?",
+                r"(?:set|change)\s+(?:the\s+)?volume\s+(?:to\s+)?" + _num,
                 re.I,
             ), "set_volume", ["level"], {}),
-            (re.compile(r"volume\s+(\d+)\s*%?", re.I),
+            (re.compile(r"volume\s+(?:to\s+)?" + _num, re.I),
              "set_volume", ["level"], {}),
             (re.compile(
-                r"(?:increase|turn\s+up|raise)\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?",
+                r"(?:increase|turn\s+up|raise)\s+(?:the\s+)?volume\s+(?:to\s+)?" + _num,
                 re.I,
             ), "set_volume", ["level"], {}),
             (re.compile(
-                r"(?:decrease|turn\s+down|lower)\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?",
+                r"(?:decrease|turn\s+down|lower)\s+(?:the\s+)?volume\s+(?:to\s+)?" + _num,
                 re.I,
             ), "set_volume", ["level"], {}),
             (re.compile(r"\bmute\b", re.I), "mute", [], {}),
@@ -53,19 +56,32 @@ class LocalProvider(AIProvider):
 
             # Brightness ----------------------------------------------------
             (re.compile(
-                r"(?:set|change)\s+(?:the\s+)?brightness\s+(?:to\s+)?(\d+)\s*%?",
+                r"(?:set|change)\s+(?:the\s+)?brightness\s+(?:to\s+)?" + _num,
                 re.I,
             ), "set_brightness", ["level"], {}),
-            (re.compile(r"brightness\s+(\d+)\s*%?", re.I),
+            (re.compile(r"brightness\s+(?:to\s+)?" + _num, re.I),
              "set_brightness", ["level"], {}),
             (re.compile(
-                r"(?:increase|raise|turn\s+up)\s+(?:the\s+)?brightness\s+(?:to\s+)?(\d+)\s*%?",
+                r"(?:increase|raise|turn\s+up)\s+(?:the\s+)?brightness\s+(?:to\s+)?" + _num,
                 re.I,
             ), "set_brightness", ["level"], {}),
 
-            # Applications --------------------------------------------------
+# Terminal Run Visible
             (re.compile(
-                r"(?:open|launch|start|run)\s+(.+)",
+                r"^(?:open|launch)\s+([\w.\-]+)\s+(?:and|then)\s+(?:run|execute|type)\s+(.*)$",
+                re.I,
+            ), "terminal_run_visible", ["terminal", "command"], {}),
+
+            # Browser Search
+            (re.compile(
+                r"^(?:open|launch)\s+([\w.\-]+)\s*(?:browser)?\s+(?:and|then)\s+search\s+([\w.\-]+)\s+for\s+(.*)$",
+                re.I,
+            ), "browser_search", ["browser_name", "site", "query"], {}),
+
+            # Applications ─ intentionally narrow: only a single app name token,
+            # not "open YouTube and subscribe to ElectroBOOM" (goes to LLM)
+            (re.compile(
+                r"^(?:open|launch|start|run)\s+([\w.\-]+)\s*$",
                 re.I,
             ), "launch_application", ["name"], {}),
 

@@ -2,36 +2,52 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import shlex
 
 from app.tools.registry import PermissionLevel, ToolParameter, ToolRegistry, ToolResult, tool
+from app.tools.os_tools.app_resolver import AppResolver
 
-
-COMMON_APPS = {
-    'firefox': 'firefox',
-    'terminal': 'kitty',  # Or whatever terminal
-    'files': 'nautilus',
-    'editor': 'vscode',
-    'chrome': 'google-chrome-stable'
-}
-
+_resolver = AppResolver()
 
 @tool(
     name="launch_application",
-    description="Launch an application by name.",
+    description="Launch an application by natural language name (e.g., 'Firefox', 'open chrome browser', 'Helium').",
     category="OS",
     permission_level=PermissionLevel.SAFE,
     parameters=[
-        ToolParameter(name="name", type="string", description="Name of the application to launch.")
+        ToolParameter(name="name", type="string", description="Name of the application to launch (can be natural language).")
     ]
 )
 async def launch_application(name: str) -> ToolResult:
-    cmd = COMMON_APPS.get(name.lower(), name)
+    match = _resolver.resolve(name)
+    
+    if match.is_ambiguous:
+        return ToolResult(
+            success=False, 
+            error=f"Multiple applications match '{name}'. Did you mean {', or '.join(match.ambiguous_candidates)}?"
+        )
+        
+    if not match.entry:
+        return ToolResult(
+            success=False, 
+            error=f"Could not find an application matching '{name}'. "
+                  f"Please clarify the name."
+        )
+        
+    entry = match.entry
+    if not entry.exec:
+        return ToolResult(
+            success=False,
+            error=f"Found application {entry.name}, but it has no execution command."
+        )
+
+    # Launch without shell
     try:
-        # Use Popen so it runs detached
-        subprocess.Popen([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return ToolResult(success=True, message=f"Launched {name}")
+        args = shlex.split(entry.exec)
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ToolResult(success=True, message=f"Launched {entry.name}")
     except Exception as e:
-        return ToolResult(success=False, error=f"Failed to launch {name}: {str(e)}")
+        return ToolResult(success=False, error=f"Failed to launch {entry.name}: {str(e)}")
 
 
 @tool(
@@ -48,7 +64,7 @@ async def list_running_applications() -> ToolResult:
     )
     stdout, _ = await process.communicate()
     if process.returncode == 0:
-        apps = list(set([line for line in stdout.decode().splitlines() if line.strip()]))
+        apps = list(set([line for line in stdout.decode('utf-8', 'replace').splitlines() if line.strip()]))
         return ToolResult(success=True, data=apps)
     return ToolResult(success=False, error="Failed to list applications")
 

@@ -16,6 +16,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
     packages = [
         'app.tools.os_tools',
         'app.tools.system',
+        'app.tools.browser',
         'app.tools.screen',
         'app.tools.files'
     ]

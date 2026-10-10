@@ -3,10 +3,24 @@ openai_api_key: ""
 openai_model: gpt-6-astra
 
 stt_provider: faster-whisper
-stt_model: base
+stt_model: large-v3-turbo
+stt_device: cpu
+stt_compute_type: int8
+stt_language: en
+stt_task: transcribe
+stt_beam_size: 5
+stt_temperature: 0.0
+stt_condition_on_previous_text: false
+stt_without_timestamps: true
+stt_vad_filter: true
+stt_vad_min_silence_duration_ms: 500
+stt_hotwords: "Helium, Firefox, Chrome, Kitty, Hyprland, NVIDIA, NetworkManager, ElectroBOOM, Airi"
 
 tts_provider: kokoro
 tts_voice: af_heart
+tts_device: cpu
+save_diagnostic_audio: false
+diagnostic_audio_dir: data/diagnostics/audio
 
 wakeword_enabled: false
 wakeword_model: hey_airi

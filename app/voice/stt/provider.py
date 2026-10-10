@@ -12,6 +12,8 @@ class STTResult(BaseModel):
     confidence: float = 0.0
     language: str = 'en'
     segments: list[dict] = Field(default_factory=list)
+    latency: float = 0.0
+    metrics: dict = Field(default_factory=dict)
 
 class STTProvider(ABC):
     """Abstract interface for Speech-to-Text providers."""
