@@ -129,11 +129,22 @@ class WhisperSTTProvider(STTProvider):
 
         if HAS_WHISPER:
             try:
-                self.model = WhisperModel(
-                    self.model_size,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                )
+                # 1. Fast offline-first load from local cache
+                try:
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    # 2. Fall back to online download if not cached
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                        local_files_only=False,
+                    )
                 logger.info(
                     "Whisper model loaded",
                     model_size=self.model_size,
@@ -150,11 +161,20 @@ class WhisperSTTProvider(STTProvider):
                     try:
                         self.device = "cpu"
                         self.compute_type = "int8"
-                        self.model = WhisperModel(
-                            self.model_size,
-                            device="cpu",
-                            compute_type="int8",
-                        )
+                        try:
+                            self.model = WhisperModel(
+                                self.model_size,
+                                device="cpu",
+                                compute_type="int8",
+                                local_files_only=True,
+                            )
+                        except Exception:
+                            self.model = WhisperModel(
+                                self.model_size,
+                                device="cpu",
+                                compute_type="int8",
+                                local_files_only=False,
+                            )
                         logger.info(
                             "Whisper model loaded on CPU fallback",
                             model_size=self.model_size,
@@ -170,11 +190,20 @@ class WhisperSTTProvider(STTProvider):
         """Get or lazily instantiate a CPU int8 fallback Faster-Whisper model."""
         if self._cpu_fallback_model is None:
             logger.info("Initializing CPU int8 fallback Whisper model", model_size=self.model_size)
-            self._cpu_fallback_model = WhisperModel(
-                self.model_size,
-                device="cpu",
-                compute_type="int8",
-            )
+            try:
+                self._cpu_fallback_model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    local_files_only=True,
+                )
+            except Exception:
+                self._cpu_fallback_model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    local_files_only=False,
+                )
         return self._cpu_fallback_model
 
     def _build_transcribe_kwargs(self) -> dict[str, Any]:

@@ -123,7 +123,7 @@ def test_whisper_provider_initialization():
     from app.voice.stt.whisper_provider import WhisperSTTProvider
     with patch("app.voice.stt.whisper_provider.WhisperModel") as mock_model:
         provider = WhisperSTTProvider(model_size="tiny.en", device="cpu")
-        mock_model.assert_called_once_with("tiny.en", device="cpu", compute_type="default")
+        mock_model.assert_called_once_with("tiny.en", device="cpu", compute_type="default", local_files_only=True)
         assert provider.is_available() is True
 
 

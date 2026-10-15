@@ -58,7 +58,7 @@ def test_whisper_provider_defaults_from_settings():
         assert provider.vad_filter is True
         assert provider.vad_parameters == {"min_silence_duration_ms": 500}
         assert provider.hotwords == DEFAULT_HOTWORDS
-        mock_model.assert_called_once_with("large-v3-turbo", device="cpu", compute_type="int8")
+        mock_model.assert_called_once_with("large-v3-turbo", device="cpu", compute_type="int8", local_files_only=True)
 
 
 def test_whisper_provider_explicit_overrides():
@@ -84,7 +84,19 @@ def test_whisper_provider_explicit_overrides():
         assert provider.without_timestamps is False
         assert provider.vad_filter is False
         assert provider.hotwords == "Test"
-        mock_model.assert_called_once_with("base", device="cpu", compute_type="default")
+        mock_model.assert_called_once_with("base", device="cpu", compute_type="default", local_files_only=True)
+
+
+def test_whisper_provider_offline_fallback_to_online():
+    """If local cached model load fails, WhisperSTTProvider falls back to online download."""
+    with patch("app.voice.stt.whisper_provider.WhisperModel") as mock_model:
+        mock_instance = MagicMock()
+        mock_model.side_effect = [RuntimeError("Local cache miss"), mock_instance]
+        provider = WhisperSTTProvider(model_size="base", device="cpu", compute_type="default")
+        assert provider.model == mock_instance
+        assert mock_model.call_count == 2
+        mock_model.assert_any_call("base", device="cpu", compute_type="default", local_files_only=True)
+        mock_model.assert_any_call("base", device="cpu", compute_type="default", local_files_only=False)
 
 
 @pytest.mark.asyncio
