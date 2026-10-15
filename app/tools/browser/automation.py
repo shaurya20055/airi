@@ -381,6 +381,7 @@ async def browser_open(browser_name: str) -> ToolResult:
         await _reset_browser_state()
         return _fail("unknown", browser_name, str(e))
 
+
 BROWSER_SEARCH_TIMEOUT = 45.0
 SEARCH_SITES = {
     "youtube": "https://www.youtube.com",
@@ -394,10 +395,18 @@ SEARCH_RESULTS_URL = {
 }
 SEARCH_SELECTORS = [
     "input[name='search_query']",   # YouTube
-    "input[name='q']",              # DuckDuckGo
+    "ytd-searchbox input#search",   # YouTube Polymer
+    "input[name='q']",              # DuckDuckGo / Google
     "textarea[name='q']",           # Google (current markup)
     "input[type='search']",
     "[placeholder*='Search' i]",
+]
+SEARCH_SUBMIT_BUTTON_SELECTORS = [
+    "button.ytSearchboxComponentSearchButton",
+    "ytd-searchbox button#search-icon-legacy",
+    "button#search-icon-legacy",
+    "form button[type='submit']",
+    "button[type='submit']",
 ]
 
 
@@ -455,8 +464,9 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
         await _page.goto(url, wait_until="domcontentloaded", timeout=15000)
         landing_url = _page.url
 
-        # 4 & 5. Locate search input and type query
+        # 4 & 5. Locate search input, focus, and type query
         typed_selector = None
+        element = None
         for sel in SEARCH_SELECTORS:
             try:
                 element = await _page.wait_for_selector(sel, state="visible", timeout=2000)
@@ -464,6 +474,11 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
                 logger.debug("search_selector_miss", selector=sel, error=type(ex).__name__)
                 continue
             if element:
+                try:
+                    if hasattr(element, "click"):
+                        await element.click(timeout=1500)
+                except Exception:
+                    pass
                 await element.fill(query)
                 typed_selector = sel
                 break
@@ -474,7 +489,7 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
 
         # 6 & 7. Submit, then wait (bounded) for navigation away from the landing page.
         # Fallbacks handle pages whose JS submit handler isn't attached yet (seen on
-        # YouTube in headed mode): Enter → Enter on the element → site results URL.
+        # YouTube in headed mode): Enter → Enter on the element → Submit button → site results URL.
         async def _moved(timeout_ms: int) -> bool:
             try:
                 await _page.wait_for_url(lambda u: u.rstrip("/") != landing_url.rstrip("/"), timeout=timeout_ms)
@@ -484,17 +499,34 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
 
         method = "keyboard_enter"
         await _page.keyboard.press("Enter")
-        if not await _moved(5000):
+        if not await _moved(3500):
             method = "element_enter"
             try:
                 await element.press("Enter")
             except Exception:
                 pass
-            if not await _moved(4000):
-                results_url = SEARCH_RESULTS_URL[key].format(q=urllib.parse.quote_plus(query))
-                method = "results_url"
-                logger.info("browser_search_fallback", method=method, url=results_url)
-                await _page.goto(results_url, wait_until="domcontentloaded", timeout=15000)
+            if not await _moved(2500):
+                # Try clicking explicit search submit button before falling back to URL
+                for btn_sel in SEARCH_SUBMIT_BUTTON_SELECTORS:
+                    try:
+                        if hasattr(_page, "locator"):
+                            btn = _page.locator(btn_sel).first
+                            if asyncio.iscoroutine(btn):
+                                btn = await btn
+                            is_vis = btn.is_visible()
+                            if asyncio.iscoroutine(is_vis):
+                                is_vis = await is_vis
+                            if is_vis:
+                                method = "submit_button"
+                                await btn.click(timeout=1500)
+                                break
+                    except Exception:
+                        continue
+                if not await _moved(2500):
+                    results_url = SEARCH_RESULTS_URL[key].format(q=urllib.parse.quote_plus(query))
+                    method = "results_url"
+                    logger.info("browser_search_fallback", method=method, url=results_url)
+                    await _page.goto(results_url, wait_until="domcontentloaded", timeout=15000)
         try:
             await _page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
@@ -521,7 +553,9 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
         logger.info("browser_search_ok", url=final_url)
         try:
             from app.agent.task_context import get_browser_task_context
-            get_browser_task_context().update_search(
+            ctx = get_browser_task_context()
+            ctx.last_inspected_elements.clear()
+            ctx.update_search(
                 browser_name=_active_browser_name or browser_name,
                 query=query,
                 site=key,
@@ -538,6 +572,7 @@ async def _do_browser_search(browser_name: str, query: str, site: str) -> ToolRe
     except Exception as e:
         return ToolResult(success=False, error=f"Failed to perform search: {e}")
 
+
 @tool(
     name="browser_navigate",
     description="Navigate the browser to a specific URL. Supports explicit new_tab option.",
@@ -552,9 +587,15 @@ async def browser_navigate(url: str, new_tab: bool = False) -> ToolResult:
     global _page, _pages, _browser_context
     from app.tools.browser.domain_aliases import normalize_domain_url
 
-    normalized_url, was_corrected = normalize_domain_url(url)
-    if not normalized_url.startswith("http") and not normalized_url.startswith("about:"):
-        normalized_url = "https://" + normalized_url
+    raw_url = (url or "").strip()
+    if not raw_url:
+        normalized_url, was_corrected = "about:blank", False
+    else:
+        normalized_url, was_corrected = normalize_domain_url(raw_url)
+        if not normalized_url:
+            normalized_url = "about:blank"
+        elif not normalized_url.startswith("http") and not normalized_url.startswith("about:"):
+            normalized_url = "https://" + normalized_url
 
     # Ensure browser session is active
     is_closed = False
@@ -584,6 +625,13 @@ async def browser_navigate(url: str, new_tab: bool = False) -> ToolResult:
             _page = new_page
             if _page not in _pages:
                 _pages.append(_page)
+            if hasattr(_page, "bring_to_front"):
+                try:
+                    btf = _page.bring_to_front()
+                    if asyncio.iscoroutine(btf):
+                        await btf
+                except Exception:
+                    pass
             logger.info("browser_new_tab_created", total_tabs=len(_browser_context.pages) if (_browser_context and hasattr(_browser_context, "pages")) else len(_pages))
 
         if normalized_url and normalized_url != "about:blank":
@@ -601,10 +649,11 @@ async def browser_navigate(url: str, new_tab: bool = False) -> ToolResult:
             except Exception:
                 pass
 
-        # Update BrowserTaskContext
+        # Update BrowserTaskContext and clear stale inspected DOM elements
         try:
             from app.agent.task_context import get_browser_task_context
             ctx = get_browser_task_context()
+            ctx.last_inspected_elements.clear()
             ctx.update_navigation(url=final_url, title=title)
             ctx.active_tab_count = len(_browser_context.pages) if (_browser_context and hasattr(_browser_context, "pages")) else len(_pages)
         except Exception:
@@ -633,6 +682,7 @@ async def browser_navigate(url: str, new_tab: bool = False) -> ToolResult:
 async def browser_new_tab(url: str = "about:blank") -> ToolResult:
     return await browser_navigate(url=url, new_tab=True)
 
+
 @tool(
     name="browser_type",
     description="Type text into an element in the browser. BROWSER_CONTROL.",
@@ -652,6 +702,7 @@ async def browser_type(selector: str, text: str) -> ToolResult:
         return ToolResult(success=True, message=f"Typed '{text}' into {selector}")
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
 
 @tool(
     name="browser_press",
@@ -673,6 +724,7 @@ async def browser_press(key: str) -> ToolResult:
     except Exception as e:
         return ToolResult(success=False, error=str(e))
 
+
 @tool(
     name="browser_click",
     description="Click an element in the browser.",
@@ -692,6 +744,7 @@ async def browser_click(selector: str) -> ToolResult:
     except Exception as e:
         return ToolResult(success=False, error=str(e))
 
+
 @tool(
     name="browser_read",
     description="Read text content from the current page.",
@@ -707,6 +760,7 @@ async def browser_read() -> ToolResult:
         return ToolResult(success=True, data={"text": content[:2000]})
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
 
 @tool(
     name="browser_screenshot",
@@ -724,6 +778,7 @@ async def browser_screenshot() -> ToolResult:
         return ToolResult(success=True, data={"path": path})
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
 
 @tool(
     name="browser_wait",
@@ -747,6 +802,7 @@ async def browser_wait(selector: str | None = None) -> ToolResult:
             return ToolResult(success=True, message="Page finished loading.")
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
 
 def register(registry) -> None:
     from app.tools.registry import ToolDefinition

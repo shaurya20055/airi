@@ -17,7 +17,7 @@ logger = structlog.get_logger(__name__)
 class OllamaRuntime(LocalModelRuntime):
     """Local runtime backed by an Ollama server using its OpenAI-compatible endpoint."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434/v1", model: str = "llama3.2:latest", timeout: float = 30.0):
+    def __init__(self, base_url: str = "http://127.0.0.1:11434/v1", model: str = "llama3.2:latest", timeout: float = 60.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -80,15 +80,32 @@ class OllamaRuntime(LocalModelRuntime):
                 res = await client.post(url, json=payload)
                 res.raise_for_status()
                 data = res.json()
+        except httpx.TimeoutException as e:
+            err_detail = str(e) or type(e).__name__
+            logger.error("Ollama request timed out", error=err_detail, timeout=self.timeout)
+            return AIResponse(
+                text=f"The local AI model timed out after {int(self.timeout)} seconds while processing your request. Please check system load.",
+                finish_reason="error",
+            )
+        except httpx.ConnectError as e:
+            err_detail = str(e) or type(e).__name__
+            logger.error("Ollama connection failed", error=err_detail)
+            return AIResponse(
+                text="Could not connect to the local Ollama server. Please ensure Ollama is running.",
+                finish_reason="error",
+            )
         except httpx.RequestError as e:
-            logger.error("Ollama connection error", error=str(e))
-            return AIResponse(text=f"Error connecting to local AI ({self.name}): {e}", finish_reason="error")
+            err_detail = str(e) or type(e).__name__
+            logger.error("Ollama connection error", error=err_detail)
+            return AIResponse(text=f"Error connecting to local AI ({self.name}): {err_detail}", finish_reason="error")
         except httpx.HTTPStatusError as e:
-            logger.error("Ollama HTTP error", error=str(e), text=e.response.text)
+            err_detail = str(e) or type(e).__name__
+            logger.error("Ollama HTTP error", error=err_detail, text=e.response.text)
             return AIResponse(text=f"Local AI HTTP error: {e.response.status_code}", finish_reason="error")
         except Exception as e:
-            logger.error("Ollama unexpected error", error=str(e))
-            return AIResponse(text=f"Local AI error: {e}", finish_reason="error")
+            err_detail = str(e) or type(e).__name__
+            logger.error("Ollama unexpected error", error=err_detail)
+            return AIResponse(text=f"Local AI error: {err_detail}", finish_reason="error")
 
         if not data.get("choices"):
             return AIResponse(text="Empty response from local AI.")

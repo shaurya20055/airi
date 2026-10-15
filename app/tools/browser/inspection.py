@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+import urllib.parse
 from typing import Any, Optional
 
 import structlog
 
 from app.agent.task_context import get_browser_task_context
-from app.tools.browser.resolver import ElementResolver, InspectedElement, ResolutionResult
+from app.tools.browser.resolver import ElementResolver, InspectedElement, ResolutionResult, _normalize_text_for_match
 from app.tools.registry import PermissionLevel, ToolDefinition, ToolParameter, ToolRegistry, ToolResult, tool
 
 logger = structlog.get_logger(__name__)
@@ -23,6 +24,29 @@ def _get_active_page():
     except Exception:
         pass
     return None
+
+
+def _video_title_matches(query: str, title: str) -> bool:
+    """Match video title resiliently across hyphens, punctuation, and trailing ellipses."""
+    if not query:
+        return True
+    if not title:
+        return False
+    q_clean = re.sub(r"(?:\s*\.{2,}|\s*…)+$", "", query.strip()).strip(" \"'").lower()
+    t_low = title.lower()
+    if not q_clean:
+        return True
+    if q_clean in t_low:
+        return True
+    norm_q = _normalize_text_for_match(q_clean)
+    norm_t = _normalize_text_for_match(t_low)
+    if norm_q and norm_q in norm_t:
+        return True
+    q_tokens = [tok for tok in re.findall(r"\w+", norm_q) if len(tok) > 1]
+    t_tokens = set(re.findall(r"\w+", norm_t))
+    if q_tokens and all(any(qt in tt for tt in t_tokens) for qt in q_tokens):
+        return True
+    return False
 
 
 @tool(
@@ -48,6 +72,31 @@ async def browser_inspect() -> ToolResult:
     () => {
         const results = [];
         const candidateSelectors = [
+            '#actions button',
+            '#top-level-buttons-computed button',
+            '#subscribe-button button',
+            'like-button-view-model button',
+            'dislike-button-view-model button',
+            'ytd-segmented-like-dislike-button-renderer button',
+            'yt-button-view-model button',
+            'button-view-model button',
+            'ytd-share-button-renderer button',
+            'button[aria-label*="Share" i]',
+            '[aria-label*="Share" i]',
+            'button[title*="Share" i]',
+            'ytd-menu-renderer button',
+            'ytd-toggle-button-renderer button',
+            'yt-lockup-view-model a.yt-lockup-metadata-view-model__title',
+            'yt-lockup-view-model a.yt-lockup-metadata-view-model-wiz__title',
+            'yt-lockup-view-model a[href*="/watch"]',
+            'ytd-video-renderer a#video-title',
+            'ytd-compact-video-renderer a#video-title',
+            'ytd-compact-video-renderer span#video-title',
+            'ytd-compact-video-renderer a#thumbnail',
+            'ytd-compact-video-renderer a[href*="/watch"]',
+            '#related ytd-compact-video-renderer a',
+            '#related yt-lockup-view-model a',
+            '#secondary yt-lockup-view-model a',
             'a[href]',
             'button',
             'input',
@@ -65,18 +114,6 @@ async def browser_inspect() -> ToolResult:
             'details',
             '[aria-expanded]',
             '[aria-pressed]',
-            'ytd-video-renderer a#video-title',
-            'ytd-compact-video-renderer a#video-title',
-            'ytd-compact-video-renderer span#video-title',
-            'ytd-compact-video-renderer a#thumbnail',
-            'ytd-compact-video-renderer a[href*="/watch"]',
-            '#related ytd-compact-video-renderer a',
-            'ytd-share-button-renderer button',
-            'button[aria-label*="Share" i]',
-            '[aria-label*="Share" i]',
-            'button[title*="Share" i]',
-            'ytd-menu-renderer button',
-            'ytd-toggle-button-renderer button',
             'article a',
             'h3 a',
             'table tr td a',
@@ -119,10 +156,20 @@ async def browser_inspect() -> ToolResult:
             let ariaLabel = el.getAttribute('aria-label') || '';
             let titleAttr = el.getAttribute('title') || '';
             let placeholder = el.getAttribute('placeholder') || '';
-            let innerText = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
-            
+            let shapeText = el.querySelector('.yt-spec-button-shape-next__button-text-content, .yt-core-attributed-string')?.textContent || '';
+            let innerText = (el.innerText || shapeText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+
+            // Disambiguate YouTube segmented Like / Dislike view models explicitly
+            const parentDislike = el.closest('dislike-button-view-model, #dislike-button, ytd-dislike-button-renderer');
+            const parentLike = !parentDislike ? el.closest('like-button-view-model, #like-button, ytd-like-button-renderer') : null;
+
             // Accessible name resolution
             let accessibleName = ariaLabel || titleAttr || placeholder || innerText;
+            if (parentDislike && !/dislike|thumbs down/i.test(accessibleName)) {
+                accessibleName = ariaLabel || 'Dislike this video';
+            } else if (parentLike && !/\\blike\\b|thumbs up/i.test(accessibleName)) {
+                accessibleName = ariaLabel || 'Like this video';
+            }
             if (accessibleName.length > 200) accessibleName = accessibleName.slice(0, 200);
 
             // Expanded state (accordions/disclosures)
@@ -150,11 +197,17 @@ async def browser_inspect() -> ToolResult:
                 checked = el.checked;
             }
 
-            // Icon detection
+            // Icon detection (IMPORTANT: check 'dislike' and 'unsubscribe' BEFORE 'like' and 'subscribe')
             let isIcon = false;
             let iconName = '';
             const isContainerTag = ['details', 'summary', 'section', 'article', 'tr', 'table', 'form', 'main', 'header', 'footer'].includes(tag);
-            if (!isContainerTag && innerText.length < 50) {
+            if (parentDislike) {
+                isIcon = true;
+                iconName = 'dislike';
+            } else if (parentLike) {
+                isIcon = true;
+                iconName = 'like';
+            } else if (!isContainerTag && innerText.length < 50) {
                 const svg = el.querySelector('svg');
                 const img = el.querySelector('img');
                 if (svg || img || /icon|fa-|svg/i.test(el.className || '')) {
@@ -163,9 +216,9 @@ async def browser_inspect() -> ToolResult:
                     const useHref = svg ? (svg.querySelector('use')?.getAttribute('href') || svg.querySelector('use')?.getAttribute('xlink:href') || '') : '';
                     const imgAlt = img ? (img.getAttribute('alt') || '') : '';
                     const classStr = typeof el.className === 'string' ? el.className : '';
-                    const allIconHints = `${svgTitle} ${useHref} ${imgAlt} ${classStr} ${ariaLabel} ${el.getAttribute('href') || ''}`.toLowerCase();
+                    const allIconHints = `${svgTitle} ${useHref} ${imgAlt} ${classStr} ${ariaLabel} ${innerText} ${el.getAttribute('href') || ''}`.toLowerCase();
                     
-                    for (let iconKw of ['leetcode', 'youtube', 'github', 'settings', 'search', 'chevron', 'arrow', 'like', 'thumbs-up', 'dislike', 'thumbs-down', 'share', 'subscribe', 'heart', 'star', 'play', 'close', 'menu', 'filter', 'gear']) {
+                    for (let iconKw of ['leetcode', 'youtube', 'github', 'settings', 'search', 'chevron', 'arrow', 'dislike', 'thumbs-down', 'unsubscribe', 'like', 'thumbs-up', 'share', 'subscribe', 'heart', 'star', 'play', 'close', 'menu', 'filter', 'gear']) {
                         if (allIconHints.includes(iconKw)) {
                             iconName = iconKw;
                             break;
@@ -176,18 +229,28 @@ async def browser_inspect() -> ToolResult:
 
             // Parent container / section hierarchy detection
             let sectionParts = [];
+            if (parentDislike) {
+                sectionParts.push('Dislike');
+            } else if (parentLike) {
+                sectionParts.push('Like');
+            }
             const parentRow = el.closest('tr, [role="row"]');
             const parentCard = el.closest('article, [role="article"], .card, .item');
             const parentDetails = el.closest('details');
             const parentSectionEl = el.closest('section, fieldset, [role="region"], [role="group"]');
-            const parentSidebarRec = el.closest('ytd-compact-video-renderer, #related, ytd-watch-next-secondary-results-renderer');
+            const parentSidebarRec = el.closest('ytd-compact-video-renderer, yt-lockup-view-model, #related, #secondary, ytd-watch-next-secondary-results-renderer');
 
             let containerType = '';
             if (parentSidebarRec) {
                 containerType = 'sidebar_recommendation';
-                const recTitle = parentSidebarRec.querySelector('#video-title')?.textContent?.trim() || '';
-                if (!accessibleName && recTitle) {
+                const cardNode = el.closest('ytd-compact-video-renderer, yt-lockup-view-model') || parentSidebarRec;
+                const recTitleEl = cardNode.querySelector('#video-title, .yt-lockup-metadata-view-model__title, .yt-lockup-metadata-view-model-wiz__title, a[href*="/watch"] span.yt-core-attributed-string');
+                const recTitle = (recTitleEl ? recTitleEl.textContent : '')?.trim() || '';
+                if ((!accessibleName || accessibleName.length < 3 || /^\d+:\d+/.test(accessibleName)) && recTitle) {
                     accessibleName = recTitle;
+                }
+                if (!innerText && recTitle) {
+                    innerText = recTitle;
                 }
                 sectionParts.push('Sidebar > Recommendations');
                 if (recTitle && !sectionParts.includes(recTitle)) {
@@ -239,7 +302,7 @@ async def browser_inspect() -> ToolResult:
 
             // Stable selector
             let selector = `[data-airi-ref="${refId}"]`;
-            if (el.id) {
+            if (el.id && !['video-title', 'thumbnail', 'button', 'content'].includes(el.id)) {
                 selector = `#${el.id}`;
             }
 
@@ -268,7 +331,7 @@ async def browser_inspect() -> ToolResult:
             });
 
             refCounter++;
-            if (results.length >= 80) break;
+            if (results.length >= 200) break;
         }
 
         return results;
@@ -501,7 +564,7 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
         )
 
     if res.status == "not_found" or res.confidence < 0.40:
-        # Bounded recovery: Trigger 1 fresh re-inspection and re-resolve before failing
+        # Bounded recovery 1: Trigger fresh re-inspection and re-resolve
         logger.info("element_not_found_reinspecting", target=target)
         inspect_res = await browser_inspect()
         if inspect_res.success and ctx.last_inspected_elements:
@@ -521,6 +584,36 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
                     message=retry_res.message,
                     data={"already_in_state": True, "verified": True, "element": retry_res.element.to_dict() if retry_res.element else None},
                 )
+
+    if res.status == "not_found" or res.confidence < 0.40:
+        # Bounded recovery 2: Scroll down slightly to reveal lazy-loaded sidebar/page elements and re-inspect once
+        try:
+            scroll_eval = page.evaluate(
+                "() => { const s = document.querySelector('#secondary, #related'); if (s) s.scrollBy(0, 500); window.scrollBy(0, 500); }"
+            )
+            if asyncio.iscoroutine(scroll_eval):
+                await scroll_eval
+            await asyncio.sleep(0.2)
+            inspect_res2 = await browser_inspect()
+            if inspect_res2.success and ctx.last_inspected_elements:
+                retry_res2 = ElementResolver.resolve(
+                    elements=ctx.last_inspected_elements,
+                    target=target,
+                    context=context,
+                    ordinal=ordinal,
+                    page_url=current_url,
+                    page_title=page_title,
+                )
+                if retry_res2.status == "found" and retry_res2.element:
+                    res = retry_res2
+                elif retry_res2.status == "already_in_state":
+                    return ToolResult(
+                        success=True,
+                        message=retry_res2.message,
+                        data={"already_in_state": True, "verified": True, "element": retry_res2.element.to_dict() if retry_res2.element else None},
+                    )
+        except Exception:
+            pass
 
     if res.status == "not_found":
         vision_res = await _try_vision_fallback_click(page, target)
@@ -602,6 +695,9 @@ async def browser_click_element(target: str, context: str = "", ordinal: int = 0
                 return ToolResult(success=False, error=f"Element stale and could not be re-resolved: {e}")
         else:
             return ToolResult(success=False, error=f"Failed to click element: {e}")
+
+    # Invalidate cached elements after any click so subsequent actions (e.g. Subscribe -> Share) inspect fresh DOM
+    ctx.last_inspected_elements.clear()
 
     # Check for Share dialog appearance if share was clicked
     is_share = (
@@ -749,6 +845,7 @@ async def browser_expand(target: str, context: str = "", collapse: bool = False)
                 count += 1
             except Exception:
                 pass
+        ctx.last_inspected_elements.clear()
         return ToolResult(
             success=True,
             message=f"Successfully {'expanded' if not collapse else 'collapsed'} {count} sections.",
@@ -806,6 +903,7 @@ async def browser_expand(target: str, context: str = "", collapse: bool = False)
     except Exception:
         new_expanded = not el.expanded
 
+    ctx.last_inspected_elements.clear()
     return ToolResult(
         success=True,
         message=f"Successfully {'expanded' if not collapse else 'collapsed'} section '{el.accessible_name}'.",
@@ -857,15 +955,50 @@ async def browser_fill_input(target: str, value: str, context: str = "", press_e
 
     el = res.element
     loc = page.locator(f"[data-airi-ref='{el.ref_id}']")
+    if asyncio.iscoroutine(loc):
+        loc = await loc
+
+    # Auto-enable Enter submission when filling a search input
+    combined_hints = f"{target} {el.accessible_name} {el.placeholder} {el.selector} {el.input_type} {el.role}".lower()
+    should_submit = press_enter or el.input_type == "search" or el.role == "searchbox" or "search" in combined_hints
+
     try:
+        initial_url = page.url if hasattr(page, "url") else ""
         fill_ret = loc.fill(value)
         if asyncio.iscoroutine(fill_ret):
             await fill_ret
 
-        if press_enter:
+        if should_submit:
             press_ret = loc.press("Enter")
             if asyncio.iscoroutine(press_ret):
                 await press_ret
+
+            # If still on the same URL and a search submit button exists, click it
+            new_url = page.url if hasattr(page, "url") else initial_url
+            if new_url == initial_url and "search" in combined_hints:
+                for btn_sel in (
+                    "button.ytSearchboxComponentSearchButton",
+                    "ytd-searchbox button#search-icon-legacy",
+                    "button#search-icon-legacy",
+                    "form button[type='submit']",
+                ):
+                    try:
+                        btn = page.locator(btn_sel).first
+                        if asyncio.iscoroutine(btn):
+                            btn = await btn
+                        cnt_f = btn.count()
+                        cnt = await cnt_f if asyncio.iscoroutine(cnt_f) else cnt_f
+                        if cnt and int(cnt) > 0:
+                            vis_f = btn.is_visible()
+                            vis = await vis_f if asyncio.iscoroutine(vis_f) else vis_f
+                            if vis:
+                                c_f = btn.click(timeout=1500)
+                                if asyncio.iscoroutine(c_f):
+                                    await c_f
+                                break
+                    except Exception:
+                        continue
+            ctx.last_inspected_elements.clear()
 
         cur_val = value
         try:
@@ -879,8 +1012,8 @@ async def browser_fill_input(target: str, value: str, context: str = "", press_e
 
         return ToolResult(
             success=True,
-            message=f"Entered '{value}' into '{el.accessible_name}'.",
-            data={"verified": True, "value": cur_val, "element": el.to_dict()},
+            message=f"Entered '{value}' into '{el.accessible_name}'." + (" Submitted search." if should_submit else ""),
+            data={"verified": True, "value": cur_val, "submitted": should_submit, "element": el.to_dict()},
         )
     except Exception as e:
         return ToolResult(success=False, error=f"Failed to fill input '{el.accessible_name}': {e}")
@@ -934,6 +1067,7 @@ async def browser_select_option(target: str, option: str, context: str = "") -> 
             if asyncio.iscoroutine(click_ret):
                 await click_ret
 
+        ctx.last_inspected_elements.clear()
         return ToolResult(
             success=True,
             message=f"Selected option '{option}'.",
@@ -964,8 +1098,8 @@ async def browser_scroll(direction: str = "down", amount: str = "page", target: 
             message="No active Airi browser session. Use browser_open or browser_search first.",
         )
 
+    ctx = get_browser_task_context()
     if target:
-        ctx = get_browser_task_context()
         if not ctx.last_inspected_elements:
             await browser_inspect()
         res = ElementResolver.resolve(ctx.last_inspected_elements, target)
@@ -975,6 +1109,7 @@ async def browser_scroll(direction: str = "down", amount: str = "page", target: 
                 scroll_ret = loc.scroll_into_view_if_needed(timeout=5000)
                 if asyncio.iscoroutine(scroll_ret):
                     await scroll_ret
+                ctx.last_inspected_elements.clear()
                 return ToolResult(
                     success=True,
                     message=f"Scrolled '{res.element.accessible_name}' into view.",
@@ -1011,6 +1146,7 @@ async def browser_scroll(direction: str = "down", amount: str = "page", target: 
         except Exception:
             pass
 
+        ctx.last_inspected_elements.clear()
         return ToolResult(
             success=True,
             message=f"Scrolled {direction}.",
@@ -1110,7 +1246,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
         # Wait briefly for results to populate if on a results page
         try:
             await page.wait_for_selector(
-                "ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, a[href*='/watch']",
+                "ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, yt-lockup-view-model, a[href*='/watch']",
                 timeout=5000,
             )
         except Exception:
@@ -1138,7 +1274,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
             count = 0
 
         if count == 0:
-            for alt_sel in ("ytd-rich-item-renderer", "ytd-compact-video-renderer"):
+            for alt_sel in ("ytd-rich-item-renderer", "ytd-compact-video-renderer", "yt-lockup-view-model"):
                 try:
                     alt_renderers = page.locator(alt_sel)
                     if asyncio.iscoroutine(alt_renderers):
@@ -1189,7 +1325,9 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
 
             if not has_tl:
                 try:
-                    alt_tl = renderer.locator("a#video-title-link, a[href*='/watch?v=']")
+                    alt_tl = renderer.locator(
+                        "a#video-title-link, a.yt-lockup-metadata-view-model__title, a.yt-lockup-metadata-view-model-wiz__title, a[href*='/watch?v=']"
+                    )
                     if asyncio.iscoroutine(alt_tl):
                         alt_tl = await alt_tl
                     alt_cnt = alt_tl.count()
@@ -1227,7 +1365,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                     ).strip()
                     title = raw_title
                     # Only filter title by query if query is not the general page search query
-                    if query and not query_in_page_url and query.lower() not in title.lower():
+                    if query and not query_in_page_url and not _video_title_matches(query, title):
                         continue
                     matched_count += 1
                     if matched_count == index:
@@ -1264,7 +1402,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                     or await link.get_attribute("aria-label")
                     or ""
                 ).strip()
-                if query and not query_in_page_url and query.lower() not in txt.lower():
+                if query and not query_in_page_url and not _video_title_matches(query, txt):
                     continue
 
                 fallback_matched += 1
@@ -1326,6 +1464,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
                 try:
                     from app.agent.task_context import get_browser_task_context
                     ctx = get_browser_task_context()
+                    ctx.last_inspected_elements.clear()
                     ctx.update_navigation(url=new_url, title=target_title)
                 except Exception:
                     pass
@@ -1410,6 +1549,7 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
             try:
                 from app.agent.task_context import get_browser_task_context
                 ctx = get_browser_task_context()
+                ctx.last_inspected_elements.clear()
                 ctx.update_navigation(url=new_url, title=selected_name)
             except Exception:
                 pass
@@ -1427,6 +1567,9 @@ async def browser_select_first(item_type: str = "video", query: str = "", index:
             )
     except Exception as e:
         logger.error("action_verification_failure", error=str(e))
+        return ToolResult(success=False, error=f"Failed to select result: {e}")
+
+
 @tool(
     name="browser_search_page",
     description="Locate the search input on the active page, enter the search query, and submit the search via Enter or search button.",
@@ -1451,6 +1594,8 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
     ctx = get_browser_task_context()
 
     search_selectors = [
+        "input.ytSearchboxComponentInput",
+        "yt-searchbox input",
         "ytd-searchbox input#search",
         "input#search",
         "input[name='search_query']",
@@ -1476,6 +1621,8 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
         )
         if res.status == "found" and res.element:
             search_loc = page.locator(f"[data-airi-ref='{res.element.ref_id}']")
+            if asyncio.iscoroutine(search_loc):
+                search_loc = await search_loc
 
     if not search_loc:
         for sel in search_selectors:
@@ -1505,7 +1652,7 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
         )
 
     try:
-        # Fill search input
+        # Focus and fill search input
         click_fut = search_loc.click(timeout=5000)
         if asyncio.iscoroutine(click_fut):
             await click_fut
@@ -1514,29 +1661,50 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
         if asyncio.iscoroutine(fill_fut):
             await fill_fut
 
-        # Submit via Enter
+        # Submit via Enter on the search element
         press_fut = search_loc.press("Enter")
         if asyncio.iscoroutine(press_fut):
             await press_fut
 
-        # Also look for search submit button if available
+        # Wait briefly to see if Enter triggered navigation
         try:
-            submit_btn = page.locator(
-                "ytd-searchbox button#search-icon-legacy, button[type='submit'], button[aria-label*='Search' i], button#search-icon-legacy"
-            ).first
-            if asyncio.iscoroutine(submit_btn):
-                submit_btn = await submit_btn
-            cnt_fut = submit_btn.count()
-            cnt = await cnt_fut if asyncio.iscoroutine(cnt_fut) else cnt_fut
-            if cnt > 0:
-                is_vis_fut = submit_btn.is_visible()
-                is_vis = await is_vis_fut if asyncio.iscoroutine(is_vis_fut) else is_vis_fut
-                if is_vis:
-                    c_fut = submit_btn.click(timeout=1500)
-                    if asyncio.iscoroutine(c_fut):
-                        await c_fut
+            if hasattr(page, "wait_for_url"):
+                w_url = page.wait_for_url(lambda u: u != initial_url, timeout=1500)
+                if asyncio.iscoroutine(w_url):
+                    await w_url
         except Exception:
             pass
+
+        cur_url_after_enter = page.url if hasattr(page, "url") else initial_url
+
+        # If Enter did not navigate, click the explicit search submit button (avoiding voice-search buttons)
+        if cur_url_after_enter == initial_url:
+            submit_selectors = [
+                "button.ytSearchboxComponentSearchButton",
+                "yt-searchbox button.ytSearchboxComponentSearchButton",
+                "ytd-searchbox button#search-icon-legacy",
+                "button#search-icon-legacy",
+                "form button[type='submit']",
+                "button[type='submit']",
+                "button[aria-label='Search']",
+            ]
+            for btn_sel in submit_selectors:
+                try:
+                    submit_btn = page.locator(btn_sel).first
+                    if asyncio.iscoroutine(submit_btn):
+                        submit_btn = await submit_btn
+                    cnt_fut = submit_btn.count()
+                    cnt = await cnt_fut if asyncio.iscoroutine(cnt_fut) else cnt_fut
+                    if cnt and int(cnt) > 0:
+                        is_vis_fut = submit_btn.is_visible()
+                        is_vis = await is_vis_fut if asyncio.iscoroutine(is_vis_fut) else is_vis_fut
+                        if is_vis:
+                            c_fut = submit_btn.click(timeout=2000)
+                            if asyncio.iscoroutine(c_fut):
+                                await c_fut
+                            break
+                except Exception:
+                    continue
 
         # Wait for navigation or results update
         try:
@@ -1548,6 +1716,27 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
             pass
 
         new_url = page.url if hasattr(page, "url") else initial_url
+
+        # Guaranteed URL fallback if on YouTube/Google/DuckDuckGo and form submission still didn't navigate
+        if new_url and new_url == initial_url and hasattr(page, "goto"):
+            low_u = initial_url.lower()
+            encoded_q = urllib.parse.quote_plus(query)
+            fallback_url = ""
+            if "youtube.com" in low_u:
+                fallback_url = f"https://www.youtube.com/results?search_query={encoded_q}"
+            elif "google.com" in low_u:
+                fallback_url = f"https://www.google.com/search?q={encoded_q}"
+            elif "duckduckgo.com" in low_u:
+                fallback_url = f"https://duckduckgo.com/?q={encoded_q}"
+            if fallback_url:
+                try:
+                    goto_fut = page.goto(fallback_url, wait_until="domcontentloaded", timeout=12000)
+                    if asyncio.iscoroutine(goto_fut):
+                        await goto_fut
+                    new_url = page.url if hasattr(page, "url") else fallback_url
+                except Exception:
+                    pass
+
         new_title = ""
         if hasattr(page, "title"):
             try:
@@ -1556,7 +1745,8 @@ async def browser_search_page(query: str, target: str = "") -> ToolResult:
             except Exception:
                 pass
 
-        # Update context
+        # Invalidate cached DOM elements and update search context
+        ctx.last_inspected_elements.clear()
         ctx.update_search(
             browser_name=ctx.active_browser_name or "Firefox",
             query=query,

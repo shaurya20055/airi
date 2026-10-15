@@ -21,6 +21,7 @@ class BrowserTaskContext:
     last_search_site: str = ""
     relevant_result_type: str = ""  # "video", "result", "option", "webpage"
     pending_operation: str = ""
+    active_tab_count: int = 0
     last_observed_state: dict[str, Any] = field(default_factory=dict)
     last_inspected_elements: list[Any] = field(default_factory=list)
     last_inspection_time: float = 0.0
@@ -82,6 +83,7 @@ class BrowserTaskContext:
         self.last_search_site = ""
         self.relevant_result_type = ""
         self.pending_operation = ""
+        self.active_tab_count = 0
         self.last_observed_state.clear()
         self.last_inspected_elements.clear()
         self.last_inspection_time = 0.0
@@ -113,6 +115,12 @@ _PRONOUN_REF_PATTERN = re.compile(
 def is_browser_result_reference(text: str) -> bool:
     """Check if utterance refers to a browser result, video, or page element."""
     clean = text.strip()
+    # If the user is referring to a specific sidebar/recommendation section, let interaction/resolver handle it
+    if re.search(r"\b(?:sidebar|recommendations?|related\s+videos?|right(?:\s+hand)?\s+side)\b", clean, re.I):
+        return False
+    # If the user specifies an explicit title (e.g. "video featuring the title ..."), use semantic element resolution
+    if re.search(r"\b(?:featuring\s+(?:the\s+)?title|with\s+(?:the\s+)?title|titled|called|named)\b", clean, re.I):
+        return False
     if _BROWSER_REF_PATTERN.search(clean):
         return True
     if _PRONOUN_REF_PATTERN.search(clean):
@@ -199,6 +207,35 @@ def set_browser_task_context(ctx: BrowserTaskContext) -> None:
     _global_context = ctx
 
 
+def _is_navigation_or_new_tab_request(text: str) -> bool:
+    """Return True if utterance is requesting a new tab or navigating to a website/domain."""
+    clean = text.strip()
+    low = clean.lower()
+    if re.search(r"\bnew\s+(?:browser\s+)?tab\b", low):
+        return True
+    nav_m = re.match(
+        r"^(?:please\s+|just\s+)?(?:open|navigate\s+to|go\s+to|visit)\s+(.+?)[.!?]?$",
+        clean,
+        re.I,
+    )
+    if nav_m:
+        cand = nav_m.group(1).strip()
+        if re.search(r"\b(?:and|then)\b", cand, re.I):
+            return False
+        # Exclude in-page UI element phrases like "open the settings menu" or "open the third problem"
+        if not re.search(r"\b(?:menu|button|icon|section|accordion|problem|video|dropdown|modal|dialog)\b", cand, re.I):
+            try:
+                from app.tools.browser.domain_aliases import normalize_domain_url
+                norm_url, was_alias = normalize_domain_url(cand)
+                if was_alias or norm_url.startswith("http://") or norm_url.startswith("https://"):
+                    return True
+            except Exception:
+                pass
+            if re.match(r"^[a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)+(/.*)?$", cand):
+                return True
+    return False
+
+
 def is_browser_interaction_command(text: str, context: Optional[BrowserTaskContext] = None) -> bool:
     """Check if utterance refers to an interaction on the active webpage."""
     ctx = context or get_browser_task_context()
@@ -208,42 +245,66 @@ def is_browser_interaction_command(text: str, context: Optional[BrowserTaskConte
     clean = text.strip()
     low = clean.lower()
 
-    # Compound search or terminal commands are never in-page clicks
-    if re.search(r"\b(?:and|then)\s+(?:search|run|execute)\b", low):
+    # Never hijack new-tab or explicit domain navigation commands
+    if _is_navigation_or_new_tab_request(clean):
         return False
-    if re.search(r"^(?:open|launch)\s+.*?\s+(?:browser\s+)?(?:and|then)\s+search\b", low):
+
+    # Compound multi-step requests starting with open/launch/start/run or containing and/then are not simple in-page clicks
+    if re.search(r"^(?:open|launch|start|run)\s+.*?\s+(?:and|then)\b", low):
         return False
+    if re.search(r"\b(?:and|then)\s+(?:subscribe|like|dislike|search|run|execute|open|launch|navigate|go\s+to|type)\b", low):
+        return False
+
     # In-page search on active session
     if re.search(r"^(?:please\s+|just\s+)?(?:search(?:\s+for)?|look\s+up)\s+(.+)$", low):
         return True
 
-    # 1. Like / Subscribe / Dislike / Share / Toggles
-    if re.search(r"^(?:please\s+|just\s+)?(?:share|like|unlike|thumbs\s+up|thumbs\s+down|dislike)(?:\s+(?:this|the)\s+video|\s+it|\s+button)?$", low):
+    # 1. Like / Subscribe / Dislike / Share / Toggles (including "click on the like button", "click share button on the same screen")
+    if re.search(
+        r"^(?:please\s+|just\s+)?(?:(?:click|tap|press|hit)(?:\s+on)?\s+(?:the\s+)?)?"
+        r"(?:share|like|unlike|thumbs[\s\-]+up|thumbs[\s\-]+down|dislike)"
+        r"(?:\s+(?:this|the)\s+(?:video|page|song|track)|\s+it|\s+button|\s+icon)"
+        r"*(?:\s+on\s+(?:the\s+|this\s+)?(?:same\s+)?(?:screen|page))?[.!?]?$",
+        low,
+    ):
         return True
-    if re.search(r"^(?:please\s+|just\s+)?(?:subscribe|unsubscribe)(?:\s+to\s+(?:this\s+)?channel|\s+to\s+channel)?$", low):
+    if re.search(
+        r"^(?:please\s+|just\s+)?(?:(?:click|tap|press|hit)(?:\s+on)?\s+(?:the\s+)?)?"
+        r"(?:subscribe|unsubscribe)"
+        r"(?:\s+(?:to|from)\s+(?:this\s+|the\s+)?channel|\s+button|\s+icon)"
+        r"*(?:\s+on\s+(?:the\s+|this\s+)?(?:same\s+)?(?:screen|page))?[.!?]?$",
+        low,
+    ):
         return True
 
     # 2. Expand / Collapse
     if re.search(r"^(?:please\s+|just\s+)?(?:expand|collapse|uncollapse)\b", low):
         return True
 
-    # 3. Contextual icon / button click ("Click the LeetCode icon beside Two Sum", "Click the LeetCode icon beside this problem")
+    # 3. Sidebar / Right-side / Titled video on page
+    if re.search(
+        r"\b(?:on\s+the\s+right(?:\s+hand)?\s+side|in\s+the\s+(?:right\s+)?sidebar|in\s+(?:the\s+)?recommendations?|"
+        r"video\s+(?:featuring\s+(?:the\s+)?title|with\s+(?:the\s+)?title|titled|called|named))\b",
+        low,
+    ):
+        return True
+
+    # 4. Contextual icon / button click ("Click the LeetCode icon beside Two Sum", "Click the LeetCode icon beside this problem")
     if re.search(r"\b(?:click(?:\s+on)?)\s+(?:the\s+)?(?:[a-zA-Z0-9_\-\s]+?)\s+(?:beside|next\s+to|under)\s+(.+)", low):
         return True
     if re.search(r"\b(?:click(?:\s+on)?|open)\s+(?:the\s+)?(?:icon|link|button)\s+(?:beside|next\s+to|for|in|under)\s+(.+)", low):
         return True
 
-    # 4. Ordinal element click ("Open the third problem in this section", "Click the 2nd problem")
-    if re.search(r"\b(?:open|click(?:\s+on)?|select)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:problem|row|card|item|accordion|section)\b", low):
+    # 5. Ordinal element click ("Open the third problem in this section", "Click the 2nd problem", "Open the second video in the recommendations")
+    if re.search(r"\b(?:open|click(?:\s+on)?|select|play)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:problem|row|card|item|accordion|section|video)\b", low):
         return True
 
-    # 5. Direct element click ("Open the Settings menu", "Click Settings", "Open Binary Search")
-    if re.search(r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|open|select)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button|\s+link|\s+menu|\s+tab|\s+icon|\s+option)?$", low):
-        # Avoid matching system/app launches if not active browser page
-        if any(kw in low for kw in ("menu", "tab", "button", "link", "icon", "section", "problem", "settings", "search", "like", "subscribe", "share")):
+    # 6. Direct element click ("Open the Settings menu", "Click Settings", "Open Binary Search")
+    if re.search(r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|tap(?:\s+on)?|press(?:\s+on)?|open|select|play)\s+(?:the\s+)?([a-zA-Z0-9_\-\s\"'\.]+?)(?:\s+button|\s+link|\s+menu|\s+tab|\s+icon|\s+option)?(?:\s+on\s+(?:the\s+|this\s+)?(?:same\s+)?(?:screen|page))?[.!?]?$", low):
+        if any(kw in low for kw in ("menu", "tab", "button", "link", "icon", "section", "problem", "settings", "search", "like", "dislike", "subscribe", "share", "video")):
             return True
         if ctx.last_inspected_elements:
-            t_low = low.replace("click", "").replace("open", "").replace("select", "").strip()
+            t_low = re.sub(r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|tap(?:\s+on)?|press(?:\s+on)?|open|select|play)\s+(?:the\s+)?", "", low).strip()
             for el in ctx.last_inspected_elements:
                 name = getattr(el, "accessible_name", "") or (el.get("accessible_name", "") if isinstance(el, dict) else "")
                 if t_low and t_low in name.lower():
@@ -251,15 +312,15 @@ def is_browser_interaction_command(text: str, context: Optional[BrowserTaskConte
         if re.search(r"^(?:open|click(?:\s+on)?)\s+(?:binary\s+search|[a-zA-Z0-9_\-\s]+)$", low) and not any(app in low for app in ("firefox", "chrome", "kitty", "terminal", "burp", "code")):
             return True
 
-    # 6. Select option
+    # 7. Select option
     if re.search(r"^(?:please\s+|just\s+)?(?:select|choose)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+(?:from\s+(?:the\s+)?dropdown|option))?$", low):
         return True
 
-    # 7. Scroll
+    # 8. Scroll
     if re.search(r"^(?:please\s+|just\s+)?scroll\s+(down|up|to\s+top|to\s+bottom)", low):
         return True
 
-    # 8. Fill input
+    # 9. Fill input
     if re.search(r"^(?:please\s+|just\s+)?(?:type|fill|enter|input)\s+.*?\s+(?:in|into|for)\s+", low):
         return True
 
@@ -278,19 +339,23 @@ def parse_browser_interaction(text: str, context: Optional[BrowserTaskContext] =
         query = re.sub(r"^for\s+", "", query, flags=re.I).strip()
         return {"tool_name": "browser_search_page", "tool_args": {"query": query}}
 
-    # 1. Like / Dislike / Share / Subscribe
-    if re.search(r"\b(?:dislike|thumbs\s+down)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "dislike", "context": ""}}
-    if re.search(r"\b(?:unlike)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "unlike", "context": ""}}
-    if re.search(r"\b(?:like|thumbs\s+up)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "like", "context": ""}}
-    if re.search(r"\b(?:share)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "share", "context": ""}}
-    if re.search(r"\b(?:subscribe)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "subscribe", "context": ""}}
-    if re.search(r"\b(?:unsubscribe)\b", low):
-        return {"tool_name": "browser_click_element", "tool_args": {"target": "unsubscribe", "context": ""}}
+    # 1. Like / Dislike / Share / Subscribe (only when not describing a video title)
+    is_titled_video_query = bool(
+        re.search(r"\b(?:featuring\s+(?:the\s+)?title|with\s+(?:the\s+)?title|titled|called|named)\b", low)
+    )
+    if not is_titled_video_query:
+        if re.search(r"\b(?:dislike|thumbs[\s\-]+down)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "dislike", "context": ""}}
+        if re.search(r"\b(?:unlike)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "unlike", "context": ""}}
+        if re.search(r"\b(?:like|thumbs[\s\-]+up)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "like", "context": ""}}
+        if re.search(r"\b(?:share)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "share", "context": ""}}
+        if re.search(r"\b(?:unsubscribe)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "unsubscribe", "context": ""}}
+        if re.search(r"\b(?:subscribe)\b", low):
+            return {"tool_name": "browser_click_element", "tool_args": {"target": "subscribe", "context": ""}}
 
     # 2. Expand / Collapse
     expand_m = re.search(r"^(?:please\s+|just\s+)?(expand|collapse|uncollapse)\s+(?:the\s+)?(.+?)(?:\s+section|\s+list|\s+accordion)?$", clean, re.I)
@@ -320,13 +385,33 @@ def parse_browser_interaction(text: str, context: Optional[BrowserTaskContext] =
 
     # 5. Select dropdown option
     select_m = re.search(r"^(?:please\s+|just\s+)?(?:select|choose)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:from\s+(?:the\s+)?dropdown|option))?$", clean, re.I)
-    if select_m and not re.search(r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|problem|row|card)\b", low):
+    if select_m and not re.search(r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|problem|row|card|video)\b", low):
         option = select_m.group(1).strip()
         return {"tool_name": "browser_select_option", "tool_args": {"target": option, "option": option}}
 
-    # 6. Ordinal element ("Open the third problem in this section")
+    # 6. Sidebar / Right-side / Titled video extraction
+    has_sidebar_hint = bool(
+        re.search(r"\b(?:right(?:\s+hand)?\s+side|sidebar|recommendations?|related\s+videos?|up\s+next)\b", low)
+    )
+    title_m = re.search(
+        r"(?:video\s+)?(?:featuring\s+(?:the\s+)?title|with\s+(?:the\s+)?title|titled|called|named)\s+[\"']?(.+?)[\"']?(?:\s+on\s+the\s+right.*|\s+in\s+the\s+sidebar.*)?[.!?]?$",
+        clean,
+        re.I,
+    )
+    if title_m:
+        extracted_title = title_m.group(1).strip().strip(" \"'")
+        extracted_title = re.sub(r"(?:\s*\.{2,}|\s*…)+$", "", extracted_title).strip(" \"'")
+        return {
+            "tool_name": "browser_click_element",
+            "tool_args": {
+                "target": extracted_title,
+                "context": "Sidebar" if has_sidebar_hint else "",
+            },
+        }
+
+    # 7. Ordinal element ("Open the third problem in this section", "Open the second video in the recommendations")
     ord_m = re.search(
-        r"^(?:please\s+|just\s+)?(?:open|click(?:\s+on)?|select)\s+(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+in\s+(?:this\s+)?(.+?)(?:\s+section|\s+list|\s+row)?)?$",
+        r"^(?:please\s+|just\s+)?(?:open|click(?:\s+on)?|select|play)\s+(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+in\s+(?:this\s+|the\s+)?(.+?)(?:\s+section|\s+list|\s+row)?)?[.!?]?$",
         clean,
         re.I,
     )
@@ -340,24 +425,33 @@ def parse_browser_interaction(text: str, context: Optional[BrowserTaskContext] =
             "tool_args": {"target": target, "context": ctx_scope, "ordinal": ord_idx},
         }
 
-    # 7. Contextual Click ("Click the LeetCode icon beside Two Sum", "Click the LeetCode icon beside this problem")
+    # 8. Contextual Click ("Click the LeetCode icon beside Two Sum", "Click the LeetCode icon beside this problem")
     beside_m = re.search(
-        r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|open|select)\s+(?:the\s+)?(.+?)\s+(?:beside|next\s+to|for|in|under)\s+(?:the\s+)?(.+?)(?:\s+section|\s+row|\s+card|\s+problem)?$",
+        r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|open|select)\s+(?:the\s+)?(.+?)\s+(?:beside|next\s+to|for|in|under)\s+(?:the\s+)?(.+?)(?:\s+section|\s+row|\s+card|\s+problem)?[.!?]?$",
         clean,
         re.I,
     )
     if beside_m:
         target = beside_m.group(1).strip()
         context_target = beside_m.group(2).strip()
-        return {
-            "tool_name": "browser_click_element",
-            "tool_args": {"target": target, "context": context_target},
-        }
+        if context_target.lower() not in ("same screen", "this screen", "the screen", "the page", "this page"):
+            return {
+                "tool_name": "browser_click_element",
+                "tool_args": {"target": target, "context": context_target},
+            }
 
-    # 8. General Click
-    clean_target = re.sub(r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|open|select)\s+(?:the\s+)?", "", clean, flags=re.I).strip()
+    # 9. General Click
+    clean_target = re.sub(
+        r"^(?:please\s+|just\s+)?(?:click(?:\s+on)?|tap(?:\s+on)?|press(?:\s+on)?|open|select|play)\s+(?:the\s+)?",
+        "",
+        clean,
+        flags=re.I,
+    ).strip()
+    clean_target = re.sub(r"\s+on\s+(?:the\s+|this\s+)?(?:same\s+)?(?:screen|page)[.!?]?$", "", clean_target, flags=re.I).strip()
     return {
         "tool_name": "browser_click_element",
-        "tool_args": {"target": clean_target, "context": ""},
+        "tool_args": {
+            "target": clean_target,
+            "context": "Sidebar" if has_sidebar_hint else "",
+        },
     }
-

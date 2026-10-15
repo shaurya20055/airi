@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     local_ai_runtime: str = "ollama"
     local_ai_model: str = "qwen3-vl:4b-instruct"
     local_ai_temperature: float = 0.7
-    local_ai_timeout: float = 30.0
+    local_ai_timeout: float = 60.0
     local_ai_device: str = "gpu"
     
     # Voice

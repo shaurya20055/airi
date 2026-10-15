@@ -66,17 +66,21 @@ class LocalProvider(AIProvider):
                 re.I,
             ), "set_brightness", ["level"], {}),
 
-# Terminal Run Visible
+            # Terminal Run Visible ------------------------------------------
             (re.compile(
                 r"^(?:open|launch)\s+([\w.\-]+)\s+(?:and|then)\s+(?:run|execute|type)\s+(.*)$",
                 re.I,
             ), "terminal_run_visible", ["terminal", "command"], {}),
 
-            # Browser Search
+            # Browser Search ------------------------------------------------
             (re.compile(
                 r"^(?:open|launch)\s+([\w.\-]+)\s*(?:browser)?\s+(?:and|then)\s+search\s+([\w.\-]+)\s+for\s+(.*)$",
                 re.I,
             ), "browser_search", ["browser_name", "site", "query"], {}),
+            (re.compile(
+                r"^(?:please\s+|just\s+)?search\s+(youtube|google|duckduckgo)\s+for\s+(.+?)[.!?]?$",
+                re.I,
+            ), "browser_search", ["site", "query"], {"browser_name": ""}),
 
             # Screen Observation & Awareness --------------------------------
             (re.compile(
@@ -100,9 +104,9 @@ class LocalProvider(AIProvider):
              "browser_select_first", [], {"item_type": "result", "query": ""}),
 
             # Applications ─ supports multi-word app names (e.g., "Burp Suite", "helm browser", "Burp sweet"),
-            # while compound actions or descriptive browser/result references are never routed to app launch.
+            # while compound actions, URLs, new-tab requests, or descriptive browser references are never routed to app launch.
             (re.compile(
-                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b|\bfirst\b|\bsecond\b|\bthird\b|\bfourth\b|\bfifth\b|\b1st\b|\b2nd\b|\b3rd\b|\bvideo\b|\bresult\b|\boption\b|\bitem\b|\blink\b|\bcurrent\b|\bone\b|\bthat\s+video\b|\bthat\s+one\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
+                r"^(?:open|launch|start|run)\s+(?!.*(?:\band\b|\bthen\b|\bsearch\b|\brun\b|\bfirst\b|\bsecond\b|\bthird\b|\bfourth\b|\bfifth\b|\b1st\b|\b2nd\b|\b3rd\b|\bvideo\b|\bresult\b|\boption\b|\bitem\b|\blink\b|\bcurrent\b|\bone\b|\bthat\s+video\b|\bthat\s+one\b|\btab\b|\bbutton\b|\bshare\b|\blike\b|\bdislike\b|\bsubscribe\b|\.(?:com|org|net|io|edu|gov|dev)\b))([a-zA-Z0-9_\-\.\s]{1,50}?)[.!?]?$",
                 re.I,
             ), "launch_application", ["name"], {}),
 
@@ -127,7 +131,77 @@ class LocalProvider(AIProvider):
         """
         text = text.strip()
 
-        # Deterministic contextual browser reference routing BEFORE generic patterns
+        # 1. Explicit New Tab & Domain Navigation routing FIRST
+        # Handles:
+        # - "open a new tab" / "new tab"
+        # - "open leetcode.com in a new tab" / "open leetcode.com in new tab"
+        # - "in the new tab, open leadcode.com"
+        # - "open a new tab and go to leetcode.com"
+        # - "open leetcode.com" / "navigate to github.com"
+        try:
+            if re.search(
+                r"^(?:please\s+|just\s+|can\s+you\s+)?(?:open\s+(?:a\s+|the\s+|another\s+)?new\s+(?:browser\s+)?tab|new\s+(?:browser\s+)?tab)[.!?]?$",
+                text,
+                re.I,
+            ):
+                return ClassifiedIntent(
+                    type=IntentType.TOOL_CALL,
+                    confidence=1.0,
+                    tool_name="browser_new_tab",
+                    tool_args={"url": "about:blank"},
+                    requires_cloud=False,
+                )
+
+            from app.tools.browser.domain_aliases import normalize_domain_url
+
+            # Compound new-tab phrasing: "open a new tab and open/go to/navigate to <url>"
+            compound_new_tab = re.search(
+                r"^(?:please\s+|just\s+|can\s+you\s+)?open\s+(?:a\s+|the\s+|another\s+)?new\s+(?:browser\s+)?tab\s+(?:and\s+|then\s+|to\s+|with\s+|for\s+)(?:open\s+|navigate\s+to\s+|go\s+to\s+|visit\s+)?(.+?)[.!?]?$",
+                text,
+                re.I,
+            )
+            if compound_new_tab:
+                target_cand = compound_new_tab.group(1).strip()
+                norm_url, _ = normalize_domain_url(target_cand)
+                return ClassifiedIntent(
+                    type=IntentType.TOOL_CALL,
+                    confidence=1.0,
+                    tool_name="browser_navigate",
+                    tool_args={"url": norm_url, "new_tab": True},
+                    requires_cloud=False,
+                )
+
+            # Standard navigation / new-tab phrasing
+            nav_match = re.search(
+                r"^(?:please\s+|just\s+|can\s+you\s+)?(?:(?:in|on|into)\s+(?:a\s+|the\s+|another\s+)?new\s+(?:browser\s+)?tab,?\s+)?(?:open(?:\s+up)?|navigate\s+to|go\s+to|visit)\s+(.+?)(?:\s+(?:in|on|into)\s+(?:a\s+|the\s+|another\s+)?new\s+(?:browser\s+)?tab)?[.!?]?$",
+                text,
+                re.I,
+            )
+            if nav_match:
+                target_cand = nav_match.group(1).strip()
+                is_explicit_new_tab = bool(re.search(r"\bnew\s+(?:browser\s+)?tab\b", text, re.I))
+                # Do not treat compound app/search/multi-step commands ("open firefox and search...", "open youtube and subscribe...") as direct URL navigation
+                if not re.search(r"\b(?:and|then)\b", target_cand, re.I):
+                    norm_url, was_alias = normalize_domain_url(target_cand)
+                    is_web_target = (
+                        was_alias
+                        or norm_url.startswith("http://")
+                        or norm_url.startswith("https://")
+                        or bool(re.search(r"\b[a-zA-Z0-9_\-]+\.(?:com|org|net|io|edu|gov|dev|co|in|me|ai)\b", target_cand, re.I))
+                        or is_explicit_new_tab
+                    )
+                    if is_web_target:
+                        return ClassifiedIntent(
+                            type=IntentType.TOOL_CALL,
+                            confidence=1.0,
+                            tool_name="browser_navigate",
+                            tool_args={"url": norm_url, "new_tab": is_explicit_new_tab},
+                            requires_cloud=False,
+                        )
+        except Exception:
+            pass
+
+        # 2. Deterministic contextual browser reference routing ("click the first video")
         try:
             from app.agent.task_context import is_browser_result_reference, parse_browser_reference
             if is_browser_result_reference(text):
@@ -146,7 +220,7 @@ class LocalProvider(AIProvider):
         except Exception:
             pass
 
-        # Contextual general browser interaction routing when active session exists
+        # 3. Contextual general browser interaction routing when active session exists
         try:
             from app.agent.task_context import is_browser_interaction_command, parse_browser_interaction
             if is_browser_interaction_command(text):
@@ -161,46 +235,7 @@ class LocalProvider(AIProvider):
         except Exception:
             pass
 
-        # Navigation / New tab routing
-        # Handles: "In the new tab, open leadcode.com", "open leadcode.com in a new tab", "open leadcode.com", etc.
-        try:
-            if re.search(r"^(?:please\s+|just\s+)?(?:open\s+(?:a\s+|the\s+)?new\s+tab|new\s+tab)[.!?]?$", text, re.I):
-                return ClassifiedIntent(
-                    type=IntentType.TOOL_CALL,
-                    confidence=1.0,
-                    tool_name="browser_new_tab",
-                    tool_args={"url": "about:blank"},
-                    requires_cloud=False,
-                )
-
-            from app.tools.browser.domain_aliases import normalize_domain_url
-            nav_match = re.search(
-                r"^(?:in\s+(?:a\s+|the\s+)?new\s+tab,?\s+)?(?:open|navigate\s+to|go\s+to)\s+(.+?)(?:\s+in\s+(?:a\s+|the\s+)?new\s+tab)?[.!?]?$",
-                text,
-                re.I,
-            )
-            if nav_match:
-                target_cand = nav_match.group(1).strip()
-                is_explicit_new_tab = bool(re.search(r"\bnew\s+tab\b", text, re.I))
-                norm_url, was_alias = normalize_domain_url(target_cand)
-                is_web_target = (
-                    was_alias
-                    or norm_url.startswith("http://")
-                    or norm_url.startswith("https://")
-                    or "." in target_cand
-                    or is_explicit_new_tab
-                )
-                if is_web_target:
-                    return ClassifiedIntent(
-                        type=IntentType.TOOL_CALL,
-                        confidence=1.0,
-                        tool_name="browser_navigate",
-                        tool_args={"url": norm_url, "new_tab": is_explicit_new_tab},
-                        requires_cloud=False,
-                    )
-        except Exception:
-            pass
-
+        # 4. Standard regex pattern table
         for pattern, tool_name, arg_names, default_args in self._patterns:
             match = pattern.search(text)
             if match:
@@ -241,17 +276,21 @@ class LocalProvider(AIProvider):
         if not messages:
             return AIResponse(text="")
 
-        last_msg = messages[-1].content
-        intent = self.classify_intent(last_msg)
+        last_msg_obj = messages[-1]
+        last_role = getattr(last_msg_obj, "role", "user")
+        last_msg = last_msg_obj.content or ""
 
-        if intent.type == IntentType.TOOL_CALL and intent.tool_name:
-            call = ToolCall(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                name=intent.tool_name,
-                arguments=intent.tool_args,
-            )
-            return AIResponse(text="", tool_calls=[call], finish_reason="tool_calls")
-            
+        # Only pattern-match on direct user utterances (not tool outputs or internal orchestrator re-prompts)
+        if last_role == "user" and not last_msg.startswith("Tool call required to perform this task"):
+            intent = self.classify_intent(last_msg)
+            if intent.type == IntentType.TOOL_CALL and intent.tool_name:
+                call = ToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    name=intent.tool_name,
+                    arguments=intent.tool_args,
+                )
+                return AIResponse(text="", tool_calls=[call], finish_reason="tool_calls")
+
         if self.runtime:
             return await self.runtime.respond(messages, tools, temperature, max_tokens)
 

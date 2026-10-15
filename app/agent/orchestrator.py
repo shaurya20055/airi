@@ -67,10 +67,34 @@ class AgentOrchestrator:
             return True
         return False
 
+    @staticmethod
+    def _is_read_only_tool(tool_name: str) -> bool:
+        """Return True if tool is an observation/inspection/query tool without mutations."""
+        t_low = tool_name.lower()
+        if t_low in (
+            "browser_inspect", "browser_inspect_page", "browser_read", "browser_read_page",
+            "browser_screenshot", "screen_observe", "screen_read", "screen_find",
+            "screen_watch_start", "screen_watch_stop",
+            "get_volume", "get_brightness", "get_system_info", "get_cpu_usage",
+            "get_memory_usage", "get_disk_usage", "get_uptime",
+            "list_running_applications", "list_directory", "search_files", "read_file",
+            "network_get_status", "network_list_interfaces", "network_list_wifi",
+            "network_check_connectivity", "network_get_tailscale_status",
+        ):
+            return True
+        if t_low.startswith("get_") or t_low.startswith("list_") or t_low.startswith("read_"):
+            return True
+        if "inspect" in t_low or "observe" in t_low:
+            return True
+        return False
+
     async def process_input(self, text: str, source: str = "cli") -> str:
         self._tools_executed_this_turn = False
         self._last_tool_results: list[Any] = []
         self._current_turn_actions: list[dict] = []
+        self._successful_tools_this_turn: list[dict] = []
+        self._mutating_tools_this_turn: list[dict] = []
+        self._failed_tools_this_turn: list[dict] = []
 
         try:
             from app.agent.task_context import get_browser_task_context
@@ -161,72 +185,120 @@ class AgentOrchestrator:
                     return final_results
             else:
                 cleaned_text = response.text.strip() if response.text else ""
+                is_action = self._is_action_request(text)
+                wants_new_tab = bool(re.search(r"\bnew\s+(?:browser\s+)?tab\b", text.lower()))
+                opened_new_tab = any(
+                    action.get("tool") == "browser_new_tab"
+                    or (action.get("tool") == "browser_navigate" and action.get("args", {}).get("new_tab"))
+                    for action in self._mutating_tools_this_turn
+                )
+
                 if cleaned_text:
                     # Check for hallucinated tool success
                     hallucinated = False
+                    hallucination_reason = ""
                     low_text = cleaned_text.lower()
                     
+                    completion_phrases = [
+                        "task completed",
+                        "task is complete",
+                        "task complete",
+                        "action completed",
+                        "successfully clicked",
+                        "i clicked",
+                        "i have clicked",
+                        "i opened",
+                        "i have opened",
+                        "i played",
+                        "i have played",
+                        "i selected",
+                        "i launched",
+                        "opened a new tab",
+                        "open a new tab",
+                        "opening a new tab",
+                        "opened new tab",
+                        "navigating to",
+                        "navigated to",
+                        "i navigated",
+                        "i have navigated",
+                        "i liked",
+                        "liked the video",
+                        "i disliked",
+                        "disliked the video",
+                        "subscribed",
+                        "i subscribed",
+                        "subscribed to",
+                        "searched for",
+                        "i searched",
+                        "searching for",
+                    ]
+                    claims_completion = (
+                        any(phrase in low_text for phrase in completion_phrases)
+                        or low_text in ("done.", "done!", "done", "completed.")
+                    )
+                    claim_patterns = (
+                        r"\b(?:opened|navigated|navigating|clicked|selected|liked|disliked|subscribed|searched|launched|running)\b",
+                        r"\b(?:i have|i've|i did|already)\b",
+                    )
+                    claims_action_done = claims_completion or any(re.search(cp, low_text) for cp in claim_patterns)
+
+                    # 1. No tools executed at all this turn
                     if not self._tools_executed_this_turn:
-                        # 1. Check literal tool names in text claiming success/completion
                         for tool in self.tool_registry.list_tools():
                             if tool.name.lower() in low_text:
                                 hallucinated = True
+                                hallucination_reason = "No tool was executed, but tool name was mentioned claiming execution."
                                 break
-                        
-                        # 2. Check general completion phrases when no tool was executed
-                        completion_phrases = [
-                            "task completed",
-                            "task is complete",
-                            "task complete",
-                            "action completed",
-                            "successfully clicked",
-                            "i clicked",
-                            "i have clicked",
-                            "i opened",
-                            "i have opened",
-                            "i played",
-                            "i have played",
-                            "i selected",
-                            "i launched",
-                            "opened a new tab",
-                            "open a new tab",
-                            "opening a new tab",
-                            "opened new tab",
-                            "navigating to",
-                            "navigated to",
-                            "i navigated",
-                            "i have navigated",
-                            "i liked",
-                            "liked the video",
-                            "i disliked",
-                            "disliked the video",
-                            "subscribed",
-                            "i subscribed",
-                            "subscribed to",
-                            "searched for",
-                            "i searched",
-                            "searching for",
-                        ]
-                        if any(phrase in low_text for phrase in completion_phrases) or low_text in ("done.", "done!", "done", "completed."):
-                            hallucinated = True
-                        elif self._is_action_request(text) and not self._tools_executed_this_turn:
-                            # Strict invariant: When user requested an action, any response claiming execution without tools is a hallucination
-                            claim_patterns = (
-                                r"\b(?:opened|navigated|navigating|clicked|selected|liked|disliked|subscribed|searched|launched|running)\b",
-                                r"\b(?:i have|i've|i did|already)\b",
-                            )
-                            if any(re.search(cp, low_text) for cp in claim_patterns):
+                        if not hallucinated:
+                            if claims_completion:
                                 hallucinated = True
+                                hallucination_reason = "No tool was executed, but completion was claimed."
+                            elif is_action and claims_action_done:
+                                hallucinated = True
+                                hallucination_reason = "Action was requested and claimed done, but no tool was executed."
 
-                    if hallucinated and not self._tools_executed_this_turn:
-                        logger.warning("hallucinated_tool_success_detected", text=cleaned_text, step=step)
+                    # 2. Action requested, but only read-only / inspection tools executed
+                    elif is_action and not self._mutating_tools_this_turn:
+                        if claims_completion or claims_action_done:
+                            hallucinated = True
+                            hallucination_reason = "Action was requested, but only read-only/inspection tools were executed."
+
+                    # 3. Failed tools: tool failed, but response claims completion/success
+                    elif self._failed_tools_this_turn and not self._mutating_tools_this_turn:
+                        if claims_completion or claims_action_done:
+                            hallucinated = True
+                            hallucination_reason = "Tool execution failed, but completion/success was claimed."
+
+                    # 4. New tab requested: verify new-tab tool succeeded
+                    elif wants_new_tab and not opened_new_tab:
+                        if claims_completion or "new tab" in low_text:
+                            hallucinated = True
+                            hallucination_reason = "New tab was requested, but no new-tab tool was successfully executed."
+
+                    if hallucinated:
+                        logger.warning(
+                            "hallucinated_tool_success_detected",
+                            text=cleaned_text,
+                            reason=hallucination_reason,
+                            step=step,
+                        )
                         if step < MAX_AGENT_STEPS - 1:
                             self.context.add_assistant_message(cleaned_text)
-                            msg = "Tool call required to perform this task. You claimed success or completion, but no tool was executed. You must emit a valid tool call."
-                            self.context.add_user_message(msg)
+                            if is_action and not self._mutating_tools_this_turn and self._tools_executed_this_turn:
+                                prompt_msg = "Action tool call required. You only inspected the page without executing the requested action. You must emit an action tool call (e.g. browser_click_element, browser_navigate, browser_search_page)."
+                            elif wants_new_tab and not opened_new_tab:
+                                prompt_msg = "Tool call required to open a new tab. You must emit browser_new_tab or browser_navigate with new_tab=True."
+                            elif self._failed_tools_this_turn and not self._mutating_tools_this_turn:
+                                prompt_msg = "The previous tool execution failed. Do not claim completion. Attempt an alternative tool or report the failure."
+                            else:
+                                prompt_msg = "Tool call required to perform this task. You claimed success or completion, but no tool was executed. You must emit a valid tool call."
+                            self.context.add_user_message(prompt_msg)
                             continue
                         else:
-                            err_msg = "Tool call required to perform this task. No tool was executed."
+                            if not self._tools_executed_this_turn:
+                                err_msg = "Tool call required to perform this task. No tool was executed."
+                            else:
+                                err_msg = "Tool call required to perform this task. No action tool was executed."
                             self.context.add_assistant_message(err_msg)
                             await self.event_bus.publish(AssistantResponseReady(text=err_msg))
                             return err_msg
@@ -235,8 +307,14 @@ class AgentOrchestrator:
                     await self.event_bus.publish(AssistantResponseReady(text=cleaned_text))
                     return cleaned_text
                 else:
-                    if self._tools_executed_this_turn:
+                    if self._mutating_tools_this_turn:
                         res_msg = "Task completed."
+                    elif self._successful_tools_this_turn and not is_action:
+                        res_msg = "Task completed."
+                    elif self._failed_tools_this_turn:
+                        err_res = self._failed_tools_this_turn[-1].get("result", None)
+                        msg = getattr(err_res, "error", "") or getattr(err_res, "message", "") or "execution failed"
+                        res_msg = f"I was unable to complete the request: {msg}"
                     else:
                         res_msg = "I was unable to complete the request because no action was performed."
                     self.context.add_assistant_message(res_msg)
@@ -333,7 +411,11 @@ class AgentOrchestrator:
             import json
             if result.success:
                 self._tools_executed_this_turn = True
-                self._current_turn_actions.append({"tool": tool_name, "args": tool_call.arguments, "success": True, "result": result})
+                action_info = {"tool": tool_name, "args": tool_call.arguments, "success": True, "result": result, "verified": verified}
+                self._current_turn_actions.append(action_info)
+                self._successful_tools_this_turn.append(action_info)
+                if not self._is_read_only_tool(tool_name):
+                    self._mutating_tools_this_turn.append(action_info)
                 res_dict = {"success": True}
                 if result.message:
                     res_dict["message"] = result.message
@@ -343,7 +425,9 @@ class AgentOrchestrator:
                 self.context.add_tool_result(tool_call.id, msg, True)
                 results.append(result.message or f"{tool_name} succeeded.")
             else:
-                self._current_turn_actions.append({"tool": tool_name, "args": tool_call.arguments, "success": False, "result": result})
+                action_info = {"tool": tool_name, "args": tool_call.arguments, "success": False, "result": result, "verified": False}
+                self._current_turn_actions.append(action_info)
+                self._failed_tools_this_turn.append(action_info)
                 res_dict = {"success": False, "error": result.error or "Unknown error"}
                 if result.message:
                     res_dict["message"] = result.message

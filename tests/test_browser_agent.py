@@ -771,3 +771,121 @@ async def test_antihallucination_rejects_conversational_claims():
     # Must refuse to return the hallucinated completion message and report error
     assert "no tool was executed" in res.lower() or "unable to complete" in res.lower()
 
+
+@pytest.mark.asyncio
+async def test_antihallucination_rejects_inspection_only_action_claims():
+    """Orchestrator rejects 'Task completed' when user asked for an action but only inspection was executed."""
+    registry = ToolRegistry()
+    register_all_tools(registry)
+    event_bus = EventBus()
+    perm_mgr = PermissionManager(event_bus=event_bus)
+    store = MemoryStore(":memory:")
+
+    mock_router = AsyncMock()
+    mock_router.is_cloud_available = AsyncMock(return_value=True)
+    # Step 0: inspects page. Step 1: claims completion without performing click. Step 2: fallback message.
+    mock_router.process.side_effect = [
+        AIResponse(
+            text="",
+            tool_calls=[ToolCall(id="c1", name="browser_inspect", arguments={})],
+            finish_reason="tool_calls",
+        ),
+        AIResponse(
+            text="Task completed. I clicked on the first video.",
+            tool_calls=[],
+            finish_reason="stop",
+        ),
+        AIResponse(
+            text="I could not click the element.",
+            tool_calls=[],
+            finish_reason="stop",
+        ),
+    ]
+
+    orchestrator = AgentOrchestrator(
+        router=mock_router,
+        tool_registry=registry,
+        memory=store,
+        event_bus=event_bus,
+        permission_manager=perm_mgr,
+    )
+
+    # Patch browser_inspect execution to return success
+    orchestrator.executor.execute = AsyncMock(return_value=ToolResult(success=True, message="Inspected 5 elements."))
+
+    res = await orchestrator.process_input("Click the first video")
+    # Must have looped to reject the inspection-only claim
+    messages = orchestrator.context.get_messages()
+    assert any("Action tool call required" in m.content for m in messages if m.role == "user")
+
+
+@pytest.mark.asyncio
+async def test_antihallucination_rejects_failed_tool_completion_claims():
+    """Orchestrator halts loop and returns error when the executed tool failed, never claiming completion."""
+    registry = ToolRegistry()
+    register_all_tools(registry)
+    event_bus = EventBus()
+    perm_mgr = PermissionManager(event_bus=event_bus)
+    store = MemoryStore(":memory:")
+
+    mock_router = AsyncMock()
+    # Step 0: calls click element (which fails).
+    mock_router.process.side_effect = [
+        AIResponse(
+            text="",
+            tool_calls=[ToolCall(id="c1", name="browser_click_element", arguments={"target": "Like"})],
+            finish_reason="tool_calls",
+        ),
+        AIResponse(
+            text="Task completed. I clicked the Like button.",
+            tool_calls=[],
+            finish_reason="stop",
+        ),
+    ]
+
+    orchestrator = AgentOrchestrator(
+        router=mock_router,
+        tool_registry=registry,
+        memory=store,
+        event_bus=event_bus,
+        permission_manager=perm_mgr,
+    )
+
+    # Mock tool executor to return a failed result
+    orchestrator.executor.execute = AsyncMock(return_value=ToolResult(success=False, error="element_not_found"))
+
+    res = await orchestrator.process_input("Like this video")
+    assert "error" in res.lower()
+    assert "element_not_found" in res.lower()
+    assert "task completed" not in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_ollama_runtime_timeout_error_handling():
+    """OllamaRuntime handles httpx.TimeoutException gracefully with non-empty error message."""
+    import httpx
+    from app.ai.providers.local.ollama_runtime import OllamaRuntime
+    from app.ai.schemas import Message
+
+    runtime = OllamaRuntime(timeout=1.0)
+    with patch("httpx.AsyncClient.post", side_effect=httpx.ReadTimeout("")):
+        res = await runtime.respond(messages=[Message(role="user", content="hello")])
+        assert res.finish_reason == "error"
+        assert "timed out after 1 seconds" in res.text
+        assert len(res.text) > 10
+
+
+@pytest.mark.asyncio
+async def test_ollama_runtime_connect_error_handling():
+    """OllamaRuntime handles httpx.ConnectError gracefully with non-empty error message."""
+    import httpx
+    from app.ai.providers.local.ollama_runtime import OllamaRuntime
+    from app.ai.schemas import Message
+
+    runtime = OllamaRuntime(timeout=1.0)
+    with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("Connection refused")):
+        res = await runtime.respond(messages=[Message(role="user", content="hello")])
+        assert res.finish_reason == "error"
+        assert "Could not connect to the local Ollama server" in res.text
+
+

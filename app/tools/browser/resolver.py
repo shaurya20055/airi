@@ -86,6 +86,17 @@ _ORDINAL_WORDS = {
 }
 
 
+def _normalize_text_for_match(s: str) -> str:
+    """Normalize hyphens, ellipses, and punctuation into single spaces for resilient matching."""
+    if not s:
+        return ""
+    cleaned = s.lower()
+    cleaned = re.sub(r"\.{2,}|…", " ", cleaned)
+    cleaned = re.sub(r"[\-_:/\\|]+", " ", cleaned)
+    cleaned = re.sub(r"[^\w\s]", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 class ElementResolver:
     """Resolves natural language element targets against structured inspected elements."""
 
@@ -103,6 +114,41 @@ class ElementResolver:
         extracted_ordinal = ordinal
         intent = default_intent
 
+        # 0. Extract sidebar / right-side location hints before parsing
+        sidebar_pattern = re.compile(
+            r"(?:\b(?:on|in|from|at)\s+(?:the\s+)?(?:right(?:\s+hand)?\s+side(?:\s+of\s+(?:the\s+)?(?:page|screen))?|"
+            r"(?:right\s+)?sidebar|recommendations?|related\s+videos?|up\s+next)\b)",
+            re.I,
+        )
+        if sidebar_pattern.search(clean_target):
+            clean_target = sidebar_pattern.sub(" ", clean_target).strip()
+            if not extracted_context:
+                extracted_context = "Sidebar"
+
+        # Extract explicit title phrases e.g. "video featuring the title 'Rage-fixing ...'" or "video titled X"
+        title_phrase_match = re.search(
+            r"(?:there\s+(?:was|is)\s+(?:a\s+)?)?(?:video\s+)?(?:featuring\s+(?:the\s+)?title|with\s+(?:the\s+)?title|titled|called|named)\s+[\"']?(.+?)[\"']?$",
+            clean_target,
+            re.I,
+        )
+        if title_phrase_match:
+            clean_target = title_phrase_match.group(1).strip()
+        else:
+            # If the user wrapped a specific title in quotes inside a longer sentence, extract it
+            quoted_match = re.search(r"[\"']([^\"']{3,})[\"']", clean_target)
+            if quoted_match and any(w in clean_target.lower() for w in ("video", "title", "titled", "called", "named", "featuring")):
+                clean_target = quoted_match.group(1).strip()
+
+        # Strip leading conversational/action verbs first so intent detection works on "click on the like button"
+        clean_target = re.sub(
+            r"^(?:please\s+|just\s+|can\s+you\s+|could\s+you\s+)*(?:click(?:\s+on)?|tap(?:\s+on)?|press(?:\s+on)?|hit|open|select|play|find(?:\s+and\s+(?:click|open|locate))?|locate)\s+",
+            "",
+            clean_target,
+            flags=re.I,
+        ).strip()
+        if clean_target.lower().startswith("the "):
+            clean_target = clean_target[4:].strip()
+
         # 1. Detect explicit action intent
         low = clean_target.lower()
         if re.match(r"^(?:expand|open\s+(?:the\s+)?accordion|uncollapse)\b", low):
@@ -111,17 +157,17 @@ class ElementResolver:
         elif re.match(r"^(?:collapse|close\s+(?:the\s+)?accordion)\b", low):
             intent = "collapse"
             clean_target = re.sub(r"^(?:collapse|close\s+(?:the\s+)?accordion)\s+", "", clean_target, flags=re.I).strip()
-        elif re.match(r"^(?:dislike|thumbs\s+down)\b", low):
+        elif re.match(r"^(?:dislike|thumbs[\s\-]+down)(?:\s+(?:this\s+|the\s+)?(?:video|it|song|track|button|btn|icon))*$", low):
             intent = "dislike"
-        elif re.match(r"^(?:like|thumbs\s+up)\b", low):
-            intent = "like"
-        elif re.match(r"^(?:unlike|remove\s+like)\b", low):
+        elif re.match(r"^(?:unlike|remove\s+like)(?:\s+(?:this\s+|the\s+)?(?:video|it|song|track|button|btn|icon))*$", low):
             intent = "unlike"
-        elif re.match(r"^(?:subscribe)\b", low):
-            intent = "subscribe"
-        elif re.match(r"^(?:unsubscribe)\b", low):
+        elif re.match(r"^(?:like|thumbs[\s\-]+up)(?:\s+(?:this\s+|the\s+)?(?:video|it|song|track|button|btn|icon))*$", low):
+            intent = "like"
+        elif re.match(r"^(?:unsubscribe)(?:\s+(?:from\s+|to\s+)?(?:this\s+|the\s+)?(?:channel|creator|user|button|btn|icon))*$", low):
             intent = "unsubscribe"
-        elif re.match(r"^(?:share)\b", low):
+        elif re.match(r"^(?:subscribe)(?:\s+(?:to\s+)?(?:this\s+|the\s+)?(?:channel|creator|user|button|btn|icon))*$", low):
+            intent = "subscribe"
+        elif re.match(r"^(?:share)(?:\s+(?:this\s+|the\s+)?(?:video|it|page|link|button|btn|icon))*$", low):
             intent = "share"
 
         # 2. Extract ordinal if present (e.g. "third problem", "the 2nd item")
@@ -147,14 +193,24 @@ class ElementResolver:
             sub_target = beside_match.group(1).strip()
             sub_context = beside_match.group(2).strip()
             # Verify sub_context isn't just a generic word
-            if sub_context.lower() not in ("current", "active", "this", "page", "browser", "it"):
+            if sub_context.lower() not in (
+                "current", "active", "this", "page", "browser", "it", "same",
+                "same screen", "screen", "window", "youtube", "video",
+            ):
                 clean_target = sub_target
                 extracted_context = sub_context
 
         # 4. Remove common noise words: "button", "icon", "link", "section" if target is more specific
-        clean_target = re.sub(r"\b(?:please|just|click|tap|open|select)\b", "", clean_target, flags=re.I).strip()
+        clean_target = re.sub(r"\b(?:please|just|click|tap|open|select|on\s+the\s+same\s+screen|on\s+this\s+screen|on\s+the\s+page)\b", "", clean_target, flags=re.I).strip()
         if clean_target.lower().startswith("the "):
             clean_target = clean_target[4:].strip()
+        if clean_target.lower().startswith("a "):
+            clean_target = clean_target[2:].strip()
+        if re.match(r"^video\s+.+", clean_target, re.I):
+            clean_target = re.sub(r"^video\s+", "", clean_target, flags=re.I).strip()
+
+        # Strip trailing ellipses and quotes (e.g. "Rage-fixing ..." -> "Rage-fixing")
+        clean_target = re.sub(r"(?:\s*\.{2,}|\s*…)+$", "", clean_target).strip(" \"'")
 
         words = clean_target.split()
         if len(words) > 1:
@@ -164,19 +220,19 @@ class ElementResolver:
 
         # 5. Clean target for like/subscribe/dislike/share
         if intent in ("like", "unlike"):
-            clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|song|track)\b", "", clean_target, flags=re.I).strip()
-            if not clean_target:
+            clean_target = re.sub(r"\b(?:this\s+|the\s+)?(?:video|it|song|track|button|btn|icon)\b", "", clean_target, flags=re.I).strip()
+            if not clean_target or clean_target.lower() in ("thumbs up", "thumbs-up", "unlike"):
                 clean_target = "like"
         elif intent in ("dislike", "undislike"):
-            clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|song|track)\b", "", clean_target, flags=re.I).strip()
-            if not clean_target:
+            clean_target = re.sub(r"\b(?:this\s+|the\s+)?(?:video|it|song|track|button|btn|icon)\b", "", clean_target, flags=re.I).strip()
+            if not clean_target or clean_target.lower() in ("thumbs down", "thumbs-down", "undislike"):
                 clean_target = "dislike"
         elif intent in ("subscribe", "unsubscribe"):
-            clean_target = re.sub(r"\b(?:to\s+)?(?:this\s+)?(?:channel|creator|user)\b", "", clean_target, flags=re.I).strip()
+            clean_target = re.sub(r"\b(?:to\s+|from\s+)?(?:this\s+|the\s+)?(?:channel|creator|user|button|btn|icon)\b", "", clean_target, flags=re.I).strip()
             if not clean_target:
-                clean_target = "subscribe"
+                clean_target = "unsubscribe" if intent == "unsubscribe" else "subscribe"
         elif intent == "share":
-            clean_target = re.sub(r"\b(?:this\s+)?(?:video|it|page)\b", "", clean_target, flags=re.I).strip()
+            clean_target = re.sub(r"\b(?:this\s+|the\s+)?(?:video|it|page|link|button|btn|icon)\b", "", clean_target, flags=re.I).strip()
             if not clean_target:
                 clean_target = "share"
         elif intent in ("expand", "collapse"):
@@ -233,14 +289,24 @@ class ElementResolver:
                     )
 
         # 2. Context Filtering / Scoping
-        # If a container context was specified (e.g. "Two Sum", "Arrays"), filter or boost elements in that container
+        # If a container context was specified (e.g. "Two Sum", "Arrays", "Sidebar"), filter or boost elements in that container
         candidate_pool = elements
         if ctx_scope:
-            scoped = [
-                el for el in elements
-                if (ctx_scope.lower() in el.parent_section.lower() or
-                    ctx_scope.lower() in el.visible_text.lower())
-            ]
+            ctx_low = ctx_scope.lower()
+            is_sidebar_ctx = any(k in ctx_low for k in ("sidebar", "right", "recommendation", "related", "up next"))
+            if is_sidebar_ctx:
+                scoped = [
+                    el for el in elements
+                    if (el.container_type == "sidebar_recommendation"
+                        or "sidebar" in el.parent_section.lower()
+                        or "recommendation" in el.parent_section.lower())
+                ]
+            else:
+                scoped = [
+                    el for el in elements
+                    if (ctx_low in el.parent_section.lower() or
+                        ctx_low in el.visible_text.lower())
+                ]
             # Only restrict to scoped pool if matching items were found
             if scoped:
                 candidate_pool = scoped
@@ -260,9 +326,10 @@ class ElementResolver:
             if score > 0.15:
                 scored.append((score, el))
 
-        if not scored:
-            # If scoped pool had nothing, fall back to scoring all elements
+        if not scored or (scored and max(s[0] for s in scored) < 0.40 and candidate_pool is not elements):
+            # If scoped pool had nothing or only weak matches, fall back to scoring all elements
             if candidate_pool is not elements:
+                scored.clear()
                 for el in elements:
                     score = cls._score_element(
                         el=el,
@@ -354,12 +421,13 @@ class ElementResolver:
             )
 
         # 6. Ambiguity Check
-        # If top two candidates have very close scores and represent distinct actions without container context
-        if len(scored) >= 2:
+        # Do not trigger ambiguity failure on canonical action intents (like, dislike, share, subscribe)
+        # when a high-confidence button is at the top of the list.
+        if len(scored) >= 2 and action_intent not in ("like", "unlike", "dislike", "undislike", "share", "subscribe", "unsubscribe"):
             second_score, second_el = scored[1]
             if (
                 abs(top_score - second_score) < 0.08
-                and top_el.accessible_name != second_el.accessible_name
+                and top_el.accessible_name.strip().lower() != second_el.accessible_name.strip().lower()
                 and not ctx_scope
             ):
                 candidate_names = [f"'{s[1].accessible_name}' in {s[1].parent_section or 'page'}" for s in scored[:3]]
@@ -404,6 +472,19 @@ class ElementResolver:
         parent_low = el.parent_section.lower().strip()
         icon_low = el.icon_name.lower().strip()
         href_low = el.href.lower().strip()
+        sel_low = el.selector.lower().strip()
+        classes_low = " ".join(c.lower() for c in el.classes)
+        all_meta_low = f"{name_low} {text_low} {parent_low} {icon_low} {sel_low} {classes_low}"
+
+        has_dislike_signal = any(
+            k in all_meta_low
+            for k in ("dislike", "thumbs down", "thumbs-down", "thumbs_down", "undislike")
+        )
+
+        # Hard guard: If target/intent is "like" (and not "dislike"), strictly reject any Dislike element
+        if intent in ("like", "unlike") or t_low in ("like", "thumbs up", "thumbs-up"):
+            if has_dislike_signal:
+                return 0.0
 
         # A. Intent-Specific Bonuses & Penalties
         if intent in ("expand", "collapse"):
@@ -417,23 +498,53 @@ class ElementResolver:
                 score -= 0.40
 
         elif intent in ("like", "unlike"):
-            if "dislike" in name_low or "dislike" in icon_low or "thumbs down" in name_low or "thumbs-down" in icon_low:
+            if el.tag == "a" and "/watch" in href_low:
                 return 0.0
-            if re.search(r"\blike\b", name_low) or icon_low == "like" or "thumbs-up" in icon_low or "thumbs up" in name_low:
-                score += 0.50
+            if (
+                re.search(r"\blike\b", name_low)
+                or re.search(r"\blike\b", text_low)
+                or icon_low in ("like", "thumbs-up")
+                or "thumbs up" in name_low
+                or "like-button" in all_meta_low
+            ):
+                score += 0.55
+                if el.tag == "button" or el.role == "button" or el.element_type in ("button", "toggle"):
+                    score += 0.15
 
         elif intent in ("dislike", "undislike"):
-            if not ("dislike" in name_low or "dislike" in icon_low or "thumbs down" in name_low or "thumbs-down" in icon_low):
+            if not has_dislike_signal:
                 return 0.0
-            score += 0.50
+            if el.tag == "a" and "/watch" in href_low:
+                return 0.0
+            score += 0.55
+            if el.tag == "button" or el.role == "button" or el.element_type in ("button", "toggle"):
+                score += 0.15
 
         elif intent == "share":
-            if "share" in name_low or "share" in icon_low:
-                score += 0.55
+            if el.tag == "a" and "/watch" in href_low:
+                score -= 0.45
+            if (
+                re.search(r"\bshare\b", name_low)
+                or re.search(r"\bshare\b", text_low)
+                or icon_low == "share"
+                or "share-button" in all_meta_low
+            ):
+                score += 0.60
+                if el.tag == "button" or el.role == "button" or el.element_type == "button":
+                    score += 0.15
 
         elif intent in ("subscribe", "unsubscribe"):
-            if "subscribe" in name_low or "subscribed" in name_low:
-                score += 0.50
+            if el.tag == "a" and "/watch" in href_low:
+                score -= 0.45
+            if (
+                "subscribe" in name_low
+                or "subscribed" in name_low
+                or "subscribe" in text_low
+                or icon_low == "subscribe"
+            ):
+                score += 0.55
+                if el.tag == "button" or el.role == "button" or el.element_type == "button":
+                    score += 0.15
 
         elif intent == "fill":
             if el.element_type == "input" or el.tag in ("input", "textarea"):
@@ -455,34 +566,61 @@ class ElementResolver:
         if is_icon_target:
             for kw in ("leetcode", "github", "youtube", "settings", "search", "filter", "close", "menu", "share"):
                 if kw in t_low:
-                    if kw in icon_low or kw in href_low or kw in name_low:
+                    if kw in icon_low or kw in href_low or kw in name_low or kw in text_low:
                         score += 0.55
                     elif el.is_icon:
                         score += 0.20
 
-        # C. Name and Text Matching
+        # C. Name and Text Matching (with hyphen/ellipsis normalization)
         if t_low:
+            norm_t = _normalize_text_for_match(t_low)
+            norm_name = _normalize_text_for_match(name_low)
+            norm_text = _normalize_text_for_match(text_low)
+
             # Prevent "like" from matching inside "dislike"
-            if t_low == "like" and ("dislike" in name_low or "dislike" in text_low):
-                pass
+            if t_low == "like" and has_dislike_signal:
+                return 0.0
             # Exact match on accessible name or visible text
-            elif t_low == name_low or t_low == text_low:
-                score += 0.50
+            elif (
+                t_low == name_low
+                or t_low == text_low
+                or (norm_t and (norm_t == norm_name or norm_t == norm_text))
+            ):
+                score += 0.60
+            # Prefix match (e.g. "Rage-fixing ..." matching "Rage-fixing my Linux setup")
+            elif norm_t and len(norm_t) >= 3 and (
+                name_low.startswith(t_low)
+                or text_low.startswith(t_low)
+                or norm_name.startswith(norm_t)
+                or norm_text.startswith(norm_t)
+            ):
+                if t_low != "like" or re.search(r"\blike\b", f"{name_low} {text_low}"):
+                    score += 0.55
             # Substring match (with whole-word check if target is 'like')
-            elif (t_low in name_low and (t_low != "like" or re.search(r"\blike\b", name_low))) or (t_low in text_low and (t_low != "like" or re.search(r"\blike\b", text_low))):
-                score += 0.35
+            elif (
+                (t_low in name_low and (t_low != "like" or re.search(r"\blike\b", name_low)))
+                or (t_low in text_low and (t_low != "like" or re.search(r"\blike\b", text_low)))
+                or (norm_t and len(norm_t) >= 3 and (norm_t in norm_name or norm_t in norm_text) and (norm_t != "like" or re.search(r"\blike\b", f"{norm_name} {norm_text}")))
+            ):
+                score += 0.48
             # Token overlap
             else:
-                t_tokens = set(re.findall(r"\w+", t_low))
-                name_tokens = set(re.findall(r"\w+", f"{name_low} {text_low} {icon_low}"))
+                t_tokens = set(re.findall(r"\w+", norm_t or t_low))
+                name_tokens = set(re.findall(r"\w+", f"{norm_name} {norm_text} {icon_low}"))
                 if t_tokens and name_tokens:
                     overlap = len(t_tokens.intersection(name_tokens)) / len(t_tokens)
-                    score += overlap * 0.35
+                    if overlap == 1.0:
+                        score += 0.48
+                    else:
+                        score += overlap * 0.40
 
-        # D. Context Match (Container / Section / Row)
+        # D. Context Match (Container / Section / Row / Sidebar)
         if context:
             c_low = context.lower()
-            if c_low == parent_low or c_low in parent_low:
+            is_sidebar_ctx = any(k in c_low for k in ("sidebar", "right", "recommendation", "related", "up next"))
+            if is_sidebar_ctx and (el.container_type == "sidebar_recommendation" or "sidebar" in parent_low or "recommendation" in parent_low):
+                score += 0.35
+            elif c_low == parent_low or c_low in parent_low:
                 score += 0.35
             elif c_low in f"{name_low} {text_low}":
                 score += 0.20
