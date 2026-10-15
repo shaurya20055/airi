@@ -83,9 +83,19 @@ class AudioPipeline:
             input("🎙️ Recording... Press Enter to stop.")
 
         try:
+            from app.core.config.settings import get_settings
+            current_settings = get_settings()
+            input_device = getattr(current_settings, "audio_input_device", None)
+
             print("\n" + "="*40)
             input("🎤 Press Enter to start recording...")
-            with sd.InputStream(samplerate=16000, channels=1, dtype='float32', callback=callback):
+            with sd.InputStream(
+                samplerate=16000,
+                channels=1,
+                dtype="float32",
+                device=input_device,
+                callback=callback,
+            ):
                 await asyncio.to_thread(wait_for_enter)
             
             if not frames:
@@ -94,6 +104,14 @@ class AudioPipeline:
                 
             audio_data = np.concatenate(frames, axis=0)
             audio_data = np.squeeze(audio_data)
+
+            duration_sec = len(audio_data) / 16000.0 if len(audio_data) > 0 else 0.0
+            peak_amp = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
+            logger.info(
+                "ptt_recording_completed",
+                duration_sec=round(duration_sec, 2),
+                peak_amplitude=round(peak_amp, 4),
+            )
 
             # Optionally save diagnostic audio
             if self.save_diagnostic_audio and len(audio_data) > 0:
@@ -122,8 +140,14 @@ class AudioPipeline:
         audio_data = await self.record_ptt()
         if audio_data is None or len(audio_data) < 8000:  # less than 0.5 sec
             logger.warning("Audio too short or empty.")
+            print("⚠️ Audio recording was too short (< 0.5s). Hold or speak during recording.")
             self._set_state(PipelineState.IDLE)
             return
+
+        peak_amp = float(np.max(np.abs(audio_data)))
+        if peak_amp < 0.002:
+            logger.warning("ptt_audio_near_silent", peak=peak_amp)
+            print("⚠️ Microphone input is near-silent. Check that your microphone is unmuted and the input volume is raised.")
 
         print("\n⚙️ Transcribing...")
         self._set_state(PipelineState.TRANSCRIBING)

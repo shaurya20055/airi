@@ -361,3 +361,69 @@ def test_benchmark_wer_computation():
     assert compute_wer("Hello world", "Goodbye earth") == 1.0
 
 
+@pytest.mark.asyncio
+async def test_whisper_vad_empty_fallback_recovers_transcript():
+    """When VAD filter prunes 100% of speech, transcribe retries without VAD and recovers transcript."""
+    with patch("app.voice.stt.whisper_provider.WhisperModel") as mock_model_cls:
+        mock_instance = MagicMock()
+        mock_model_cls.return_value = mock_instance
+
+        # First call with vad_filter=True returns empty segments;
+        # Fallback call with vad_filter=False returns the actual speech segment.
+        seg = MagicMock()
+        seg.text = "Recovered speech from VAD fallback"
+        seg.start = 0.0
+        seg.end = 2.0
+        info = MagicMock()
+        info.language = "en"
+        info.language_probability = 0.99
+
+        mock_instance.transcribe.side_effect = [
+            ([], info),  # VAD returned nothing
+            ([seg], info),  # Fallback returned transcript
+        ]
+
+        provider = WhisperSTTProvider()
+        audio = np.ones(16000, dtype=np.float32) * 0.05
+        result = await provider.transcribe(audio, sample_rate=16000)
+
+        assert result.text == "Recovered speech from VAD fallback"
+        assert mock_instance.transcribe.call_count == 2
+        # First call had vad_filter=True
+        assert mock_instance.transcribe.call_args_list[0][1]["vad_filter"] is True
+        # Second call had vad_filter=False
+        assert mock_instance.transcribe.call_args_list[1][1]["vad_filter"] is False
+
+
+@pytest.mark.asyncio
+async def test_whisper_audio_dc_and_peak_normalization():
+    """Verify DC offset is removed and signal is peak-normalized to ~0.95."""
+    with patch("app.voice.stt.whisper_provider.WhisperModel") as mock_model_cls:
+        mock_instance = MagicMock()
+        mock_model_cls.return_value = mock_instance
+
+        seg = MagicMock()
+        seg.text = "Processed"
+        seg.start = 0.0
+        seg.end = 1.0
+        info = MagicMock()
+        info.language = "en"
+        info.language_probability = 1.0
+        mock_instance.transcribe.return_value = ([seg], info)
+
+        provider = WhisperSTTProvider()
+        # Audio with DC bias of +0.1 and small peak amplitude of 0.2
+        raw_audio = np.full(16000, 0.1, dtype=np.float32)
+        raw_audio[0:1000] = 0.2
+        raw_audio[1000:2000] = 0.0
+
+        await provider.transcribe(raw_audio, sample_rate=16000)
+
+        passed_audio = mock_instance.transcribe.call_args[0][0]
+        # Peak amplitude of passed audio should now be scaled close to 0.95
+        assert np.max(np.abs(passed_audio)) == pytest.approx(0.95, rel=1e-2)
+        # Mean DC offset should be centered near 0
+        assert np.mean(passed_audio) == pytest.approx(0.0, abs=1e-5)
+
+
+

@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     tts_device: str = 'cpu'
     wakeword_enabled: bool = False
     wakeword_model: str = 'hey_airi'
+    audio_input_device: int | str | None = None
+    stt_vad_threshold: float | None = None
     save_diagnostic_audio: bool = False
     diagnostic_audio_dir: str = 'data/diagnostics/audio'
     

@@ -245,6 +245,16 @@ class WhisperSTTProvider(STTProvider):
                     ).astype(np.float32)
                 sample_rate = 16000
 
+            # Signal preprocessing: remove DC offset and peak-normalize audible signals
+            # to provide optimal dynamic range for Silero VAD and Whisper acoustic models.
+            if len(audio_data) > 0:
+                peak = float(np.max(np.abs(audio_data)))
+                if peak >= 0.002:
+                    audio_data = audio_data - np.mean(audio_data)
+                    centered_peak = float(np.max(np.abs(audio_data)))
+                    if centered_peak > 1e-6:
+                        audio_data = (audio_data / centered_peak) * 0.95
+
         def _transcribe() -> STTResult:
             t0 = time.perf_counter()
             kwargs = self._build_transcribe_kwargs()
@@ -280,6 +290,25 @@ class WhisperSTTProvider(STTProvider):
                     segments_list = list(segments)
                 else:
                     raise
+
+            # Fallback: if VAD filter was enabled but pruned all audio (0 segments detected),
+            # retry without VAD filter so quiet or soft speech is not lost.
+            if not segments_list and kwargs.get("vad_filter", False):
+                logger.info(
+                    "stt_vad_pruned_all_segments_retrying_without_vad",
+                    action="fallback_transcribe_raw",
+                )
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs["vad_filter"] = False
+                try:
+                    active_model = self._cpu_fallback_model if recovered_from_oom else self.model
+                    fallback_segments, fallback_info = active_model.transcribe(audio_data, **fallback_kwargs)
+                    fallback_list = list(fallback_segments)
+                    if fallback_list:
+                        segments_list = fallback_list
+                        info = fallback_info
+                except Exception as fb_err:
+                    logger.warning("vad_fallback_transcription_failed", error=str(fb_err))
 
             t1 = time.perf_counter()
             latency = t1 - t0
@@ -388,6 +417,25 @@ class WhisperSTTProvider(STTProvider):
                     segments_list = list(segments)
                 else:
                     raise
+
+            # Fallback: if VAD filter was enabled but pruned all audio (0 segments detected),
+            # retry without VAD filter so quiet speech is not lost.
+            if not segments_list and kwargs.get("vad_filter", False):
+                logger.info(
+                    "stt_vad_pruned_all_segments_retrying_without_vad",
+                    action="fallback_transcribe_raw",
+                )
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs["vad_filter"] = False
+                try:
+                    active_model = self._cpu_fallback_model if recovered_from_oom else self.model
+                    fallback_segments, fallback_info = active_model.transcribe(audio_target, **fallback_kwargs)
+                    fallback_list = list(fallback_segments)
+                    if fallback_list:
+                        segments_list = fallback_list
+                        info = fallback_info
+                except Exception as fb_err:
+                    logger.warning("vad_fallback_transcription_failed", error=str(fb_err))
 
             t1 = time.perf_counter()
             latency = t1 - t0
