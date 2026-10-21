@@ -87,23 +87,66 @@ class AudioPipeline:
             current_settings = get_settings()
             input_device = getattr(current_settings, "audio_input_device", None)
 
+            # Query hardware native sample rate and channels to avoid ALSA paInvalidSampleRate (-9997)
+            native_sr = 16000
+            channels = 1
+            try:
+                dev_info = (
+                    sd.query_devices(input_device, "input")
+                    if input_device is not None
+                    else sd.query_devices(kind="input")
+                )
+                if isinstance(dev_info, dict):
+                    native_sr = int(dev_info.get("default_samplerate", 16000))
+                    max_in = int(dev_info.get("max_input_channels", 1))
+                    channels = min(max_in, 2) if max_in > 0 else 1
+            except Exception as dev_err:
+                logger.debug("could_not_query_device_info", error=str(dev_err))
+                native_sr = 16000
+                channels = 1
+
             print("\n" + "="*40)
             input("🎤 Press Enter to start recording...")
-            with sd.InputStream(
-                samplerate=16000,
-                channels=1,
-                dtype="float32",
-                device=input_device,
-                callback=callback,
-            ):
-                await asyncio.to_thread(wait_for_enter)
+            try:
+                with sd.InputStream(
+                    samplerate=native_sr,
+                    channels=channels,
+                    dtype="float32",
+                    device=input_device,
+                    callback=callback,
+                ):
+                    await asyncio.to_thread(wait_for_enter)
+            except Exception as stream_err:
+                logger.warning("native_stream_failed_falling_back_to_16k", error=str(stream_err))
+                native_sr = 16000
+                channels = 1
+                with sd.InputStream(
+                    samplerate=16000,
+                    channels=1,
+                    dtype="float32",
+                    device=input_device,
+                    callback=callback,
+                ):
+                    await asyncio.to_thread(wait_for_enter)
             
             if not frames:
                 self._set_state(PipelineState.IDLE)
                 return None
                 
             audio_data = np.concatenate(frames, axis=0)
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1)
             audio_data = np.squeeze(audio_data)
+
+            # Resample to 16kHz if captured at hardware native rate (e.g. 48kHz)
+            if native_sr != 16000 and len(audio_data) > 0:
+                target_len = int((len(audio_data) / float(native_sr)) * 16000)
+                if target_len > 0:
+                    audio_data = np.interp(
+                        np.linspace(0, len(audio_data), target_len, endpoint=False),
+                        np.arange(len(audio_data)),
+                        audio_data,
+                    ).astype(np.float32)
 
             duration_sec = len(audio_data) / 16000.0 if len(audio_data) > 0 else 0.0
             peak_amp = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
@@ -111,6 +154,7 @@ class AudioPipeline:
                 "ptt_recording_completed",
                 duration_sec=round(duration_sec, 2),
                 peak_amplitude=round(peak_amp, 4),
+                native_sample_rate=native_sr,
             )
 
             # Optionally save diagnostic audio
